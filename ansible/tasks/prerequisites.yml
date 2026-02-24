@@ -1,0 +1,88 @@
+---
+# Kubernetes Prerequisites Installation
+# Dispatcher: installs OS-specific packages first, then configures kernel/sysctl
+
+# ============================================
+# Cluster/Node Environment Variables (so they appear in `env` on the node)
+# ============================================
+
+- name: Apply cluster/node environment variables to this host
+  import_tasks: env-vars.yml
+
+# ============================================
+# OS-Specific Package Installation (must run first -- provides kmod, etc.)
+# ============================================
+
+- name: Include Ubuntu/Debian prerequisites
+  include_tasks: prerequisites-ubuntu.yml
+  when: ansible_os_family == "Debian"
+
+- name: Include SUSE/SLES prerequisites
+  include_tasks: prerequisites-suse.yml
+  when: ansible_os_family == "Suse"
+
+# ============================================
+# Configure Kernel Modules (OS-agnostic, requires kmod from packages above)
+# ============================================
+
+- name: Load kernel modules immediately
+  modprobe:
+    name: "{{ item }}"
+    state: present
+  loop: "{{ kernel_modules }}"
+  failed_when: false
+
+- name: Ensure kernel modules load on boot
+  lineinfile:
+    path: /etc/modules-load.d/k8s.conf
+    line: "{{ item }}"
+    create: yes
+    mode: '0644'
+  loop: "{{ kernel_modules }}"
+  failed_when: false
+
+- name: Configure sysctl parameters for Kubernetes
+  sysctl:
+    name: "{{ item.key }}"
+    value: "{{ item.value }}"
+    sysctl_file: /etc/sysctl.d/k8s.conf
+    state: present
+    reload: yes
+  loop: "{{ sysctl_config | dict2items }}"
+  failed_when: false
+
+- name: Apply sysctl parameters immediately
+  command: sysctl --system
+  changed_when: false
+  failed_when: false
+
+# ============================================
+# Disable Swap (OS-agnostic)
+# ============================================
+
+- name: Check if swap is enabled
+  command: swapon --show
+  register: swap_status
+  changed_when: false
+  failed_when: false
+
+- name: Disable swap immediately
+  command: swapoff -a
+  when: swap_status.stdout != ""
+  failed_when: false
+
+- name: Remove swap entries from /etc/fstab
+  lineinfile:
+    path: /etc/fstab
+    regexp: '^([^#].*?\sswap\s+sw\s+.*)$'
+    line: '# \1'
+    backrefs: yes
+    state: present
+  when: disable_swap | bool
+  failed_when: false
+
+- name: Ensure swap is disabled on reboot
+  systemd:
+    name: swap.target
+    masked: yes
+  failed_when: false

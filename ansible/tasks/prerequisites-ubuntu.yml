@@ -1,0 +1,241 @@
+---
+# Ubuntu/Debian Prerequisites - Package Installation and K8s Repo Setup
+
+# ============================================
+# Update System and Install Base Packages
+# ============================================
+
+- name: Update apt cache
+  apt:
+    update_cache: yes
+    cache_valid_time: 3600
+  retries: 3
+  delay: 10
+
+- name: Install prerequisite packages
+  apt:
+    name:
+      - apt-transport-https
+      - ca-certificates
+      - curl
+      - gnupg
+      - lsb-release
+      - conntrack
+      - kmod
+    state: present
+    update_cache: no
+  retries: 3
+  delay: 10
+
+# ============================================
+# Install and Configure Containerd
+# ============================================
+
+- name: Install Docker and containerd packages
+  apt:
+    name:
+      - docker.io
+      - containerd
+      - openvswitch-switch
+      - python3
+      - jq
+    state: present
+    update_cache: no
+
+- name: Enable and start Docker service (systemd)
+  systemd:
+    name: docker
+    enabled: yes
+    state: started
+  failed_when: false
+  when: ansible_service_mgr == 'systemd'
+
+- name: Create containerd configuration directory
+  file:
+    path: "{{ containerd_config_dir }}"
+    state: directory
+    mode: '0755'
+
+- name: Check if containerd is available
+  shell: which containerd 2>/dev/null || find /usr/bin /usr/sbin /usr/local/bin -name containerd 2>/dev/null | head -1
+  register: containerd_bin
+  changed_when: false
+  failed_when: false
+
+- name: Check if containerd config has actual content
+  shell: grep -c '^\[' {{ containerd_config_file }} 2>/dev/null || echo "0"
+  register: containerd_config_sections
+  changed_when: false
+  failed_when: false
+
+- name: Generate default containerd configuration
+  shell: "{{ containerd_bin.stdout | trim }} config default > {{ containerd_config_file }}"
+  when: containerd_bin.stdout | length > 0 and (containerd_config_sections.stdout | trim | int) == 0
+  failed_when: false
+
+- name: Configure containerd to use systemd cgroup driver
+  replace:
+    path: "{{ containerd_config_file }}"
+    regexp: 'SystemdCgroup = false'
+    replace: 'SystemdCgroup = true'
+  when: ansible_service_mgr == 'systemd'
+  failed_when: false
+
+- name: Check if running inside a container
+  stat:
+    path: /.dockerenv
+  register: dockerenv_check
+
+- name: Configure containerd native snapshotter for container environments
+  shell: |
+    if [ -f {{ containerd_config_file }} ]; then
+      sed -i 's/snapshotter = "overlayfs"/snapshotter = "native"/' {{ containerd_config_file }}
+    fi
+  when: dockerenv_check.stat.exists or ansible_service_mgr != 'systemd'
+  failed_when: false
+
+- name: Test overlayfs whiteout xattr support on containerd data directory
+  shell: |
+    mkdir -p /var/lib/containerd
+    testfile=$(mktemp /var/lib/containerd/.xattr-test.XXXXXX)
+    result=$(python3 -c "
+    import os, sys
+    try:
+        os.setxattr(sys.argv[1], b'trusted.overlay.opaque', b'y')
+        print('supported')
+    except (OSError, IOError):
+        print('not_supported')
+    " "$testfile" 2>/dev/null)
+    rm -f "$testfile"
+    echo "$result"
+  register: overlayfs_xattr_test
+  changed_when: false
+  failed_when: false
+
+- name: Fall back to native snapshotter if overlayfs whiteouts not supported
+  shell: |
+    sed -i 's/snapshotter = "overlayfs"/snapshotter = "native"/' {{ containerd_config_file }}
+  when: overlayfs_xattr_test.stdout is defined and "not_supported" in overlayfs_xattr_test.stdout
+  failed_when: false
+
+- name: Restart containerd service (systemd)
+  systemd:
+    name: containerd
+    state: restarted
+    daemon_reload: yes
+  when: ansible_service_mgr == 'systemd'
+
+- name: Enable containerd service (systemd)
+  systemd:
+    name: containerd
+    enabled: yes
+  when: ansible_service_mgr == 'systemd'
+
+- name: Ensure containerd runtime directories exist (non-systemd)
+  file:
+    path: "{{ item }}"
+    state: directory
+    mode: '0755'
+  loop:
+    - /run/containerd
+    - /var/run/containerd
+  when: ansible_service_mgr != 'systemd'
+  failed_when: false
+
+- name: Start containerd directly (non-systemd)
+  shell: |
+    pkill -x containerd || true
+    sleep 1
+    nohup containerd > /var/log/containerd.log 2>&1 &
+    for i in $(seq 1 15); do
+      if [ -S /run/containerd/containerd.sock ] || [ -S /var/run/containerd/containerd.sock ]; then
+        exit 0
+      fi
+      sleep 2
+    done
+    echo "containerd socket not found after 30s" >&2
+    cat /var/log/containerd.log >&2 || true
+    exit 1
+  when: ansible_service_mgr != 'systemd' and containerd_bin.stdout | length > 0
+
+- name: Symlink containerd socket for compatibility
+  shell: |
+    if [ -S /run/containerd/containerd.sock ] && [ ! -S /var/run/containerd/containerd.sock ]; then
+      ln -sf /run/containerd/containerd.sock /var/run/containerd/containerd.sock
+    elif [ -S /var/run/containerd/containerd.sock ] && [ ! -S /run/containerd/containerd.sock ]; then
+      mkdir -p /run/containerd
+      ln -sf /var/run/containerd/containerd.sock /run/containerd/containerd.sock
+    fi
+  failed_when: false
+
+# ============================================
+# Install Kubernetes Tools
+# ============================================
+
+- name: Create directory for apt keyrings
+  file:
+    path: /etc/apt/keyrings
+    state: directory
+    mode: '0755'
+
+- name: Check if Kubernetes GPG key already exists
+  stat:
+    path: /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+  register: k8s_gpg_key
+
+- name: Remove old Kubernetes configurations if key is missing or corrupted
+  file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /etc/apt/sources.list.d/kubernetes.list
+    - /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+  when: not k8s_gpg_key.stat.exists
+
+- name: Download and install Kubernetes GPG key
+  shell: |
+    curl -fsSL https://pkgs.k8s.io/core:/stable:/v{{ kubernetes_version }}/deb/Release.key | gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+    chmod 644 /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+  when: not k8s_gpg_key.stat.exists
+  retries: 3
+  delay: 10
+
+- name: Add Kubernetes apt repository
+  shell: |
+    echo "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v{{ kubernetes_version }}/deb/ /" | tee /etc/apt/sources.list.d/kubernetes.list
+  args:
+    creates: /etc/apt/sources.list.d/kubernetes.list
+
+- name: Update apt cache after adding Kubernetes repository
+  apt:
+    update_cache: yes
+  retries: 3
+  delay: 10
+
+- name: Install Kubernetes tools (kubelet, kubeadm, kubectl)
+  apt:
+    name:
+      - kubelet
+      - kubeadm
+      - kubectl
+    state: present
+    update_cache: no
+  register: k8s_tools_installed
+
+- name: Hold Kubernetes packages at current version
+  shell: apt-mark hold kubelet kubeadm kubectl
+  when: k8s_tools_installed.changed
+
+- name: Enable kubelet service (systemd)
+  systemd:
+    name: kubelet
+    enabled: yes
+    daemon_reload: yes
+  when: ansible_service_mgr == 'systemd'
+
+- name: Create kubelet service directory for extra configuration
+  file:
+    path: /etc/systemd/system/kubelet.service.d
+    state: directory
+    mode: '0755'
+  failed_when: false

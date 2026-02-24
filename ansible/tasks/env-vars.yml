@@ -1,0 +1,47 @@
+---
+# Apply cluster/node environment variables to the node
+# So they appear in the shell (e.g. when running `env` after SSH)
+# Uses node_env_vars (host var from inventory, already merged cluster+group+node) or cluster_env_vars
+# Inventory may pass node_env_vars as a JSON string; normalize to a dict.
+
+- name: Set raw env vars for this host
+  set_fact:
+    _raw_env: "{{ node_env_vars | default(cluster_env_vars | default({})) }}"
+
+- name: Normalize effective env vars from JSON string
+  set_fact:
+    effective_env_vars: "{{ (_raw_env | replace('\\\"', '\"')) | from_json }}"
+  when: _raw_env is string
+
+- name: Use raw env vars when already a dict
+  set_fact:
+    effective_env_vars: "{{ _raw_env }}"
+  when: _raw_env is mapping
+
+- name: Set empty env vars when missing or invalid
+  set_fact:
+    effective_env_vars: {}
+  when: not (_raw_env is string) and not (_raw_env is mapping)
+
+- name: Ensure /etc/profile.d exists
+  file:
+    path: /etc/profile.d
+    state: directory
+    mode: '0755'
+
+- name: Write cluster/node environment variables to profile.d
+  copy:
+    content: |
+      # Ascendra cluster/node environment variables (managed by Ansible)
+      {% for key, value in effective_env_vars.items() %}
+      export {{ key }}="{{ value | string | replace('\\', '\\\\') | replace('"', '\\"') | replace('\n', ' ') }}"
+      {% endfor %}
+    dest: /etc/profile.d/ascendra-env.sh
+    mode: '0644'
+  when: effective_env_vars | length > 0
+
+- name: Remove profile.d env file when no vars are set
+  file:
+    path: /etc/profile.d/ascendra-env.sh
+    state: absent
+  when: effective_env_vars | length == 0

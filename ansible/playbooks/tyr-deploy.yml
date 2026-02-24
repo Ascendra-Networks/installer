@@ -1,0 +1,550 @@
+---
+# Playbook for deploying Tyr on Kubernetes cluster
+# This playbook installs Helm, creates necessary secrets, and deploys Tyr
+
+################################################################################
+# Phase 1: Install Helm on Master Node
+################################################################################
+- name: Phase 1 - Install Helm
+  hosts: masters[0]
+  become: yes
+  gather_facts: yes
+  
+  vars_files:
+    - ../inventory/group_vars/all.yml
+    - ../inventory/group_vars/masters.yml
+  
+  tasks:
+    - name: Check if Helm is already installed
+      command: helm version --short
+      register: helm_check
+      changed_when: false
+      failed_when: false
+    
+    - name: Download Helm installation script
+      get_url:
+        url: https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+        dest: /tmp/get_helm.sh
+        mode: '0700'
+      when: helm_check.rc != 0
+    
+    - name: Install Helm
+      command: /tmp/get_helm.sh
+      args:
+        creates: /usr/local/bin/helm
+      when: helm_check.rc != 0
+    
+    - name: Verify Helm installation
+      command: helm version --short
+      register: helm_version
+      changed_when: false
+    
+    - name: Display Helm version
+      debug:
+        msg: "✓ Helm installed: {{ helm_version.stdout }}"
+    
+    - name: Remove Helm installation script
+      file:
+        path: /tmp/get_helm.sh
+        state: absent
+      when: helm_check.rc != 0
+  
+  tags:
+    - helm
+    - phase1
+
+################################################################################
+# Phase 2: Login to GHCR and Create Namespace
+################################################################################
+- name: Phase 2 - Configure Kubernetes for Tyr
+  hosts: masters[0]
+  become: yes
+  gather_facts: no
+  
+  vars_files:
+    - ../inventory/group_vars/all.yml
+    - ../inventory/group_vars/masters.yml
+  
+  tasks:
+    - name: Verify required variables are defined
+      assert:
+        that:
+          - tyr_ghcr_username is defined
+          - tyr_ghcr_password is defined
+          - tyr_version is defined
+        fail_msg: "Required variables not defined. Please set tyr_ghcr_username, tyr_ghcr_password, and tyr_version"
+        success_msg: "✓ All required variables are defined"
+    
+    - name: Check Helm version
+      command: helm version --short
+      register: helm_version_check
+      changed_when: false
+      failed_when: false
+    
+    - name: Display Helm version
+      debug:
+        msg: "Helm version: {{ helm_version_check.stdout }}"
+    
+    - name: Login to GHCR with Helm (direct method)
+      shell: |
+        echo '{{ tyr_ghcr_password }}' | helm registry login ghcr.io --username {{ tyr_ghcr_username }} --password-stdin
+      register: helm_login
+      changed_when: "'Login Succeeded' in helm_login.stdout"
+      failed_when: false
+      no_log: true
+    
+    - name: Login to Docker registry as fallback
+      shell: |
+        echo '{{ tyr_ghcr_password }}' | docker login ghcr.io --username {{ tyr_ghcr_username }} --password-stdin
+      register: docker_login
+      changed_when: false
+      failed_when: false
+      no_log: true
+      when: helm_login.rc != 0
+    
+    - name: Display Helm login status
+      debug:
+        msg: "✓ Successfully logged in to ghcr.io with Helm"
+      when: helm_login.rc == 0
+    
+    - name: Display Docker fallback login status
+      debug:
+        msg:
+          - "⚠️  Helm registry login failed, but Docker login succeeded"
+          - "Helm will use Docker's credentials automatically"
+          - "Proceeding with deployment..."
+      when: helm_login.rc != 0 and docker_login is defined and docker_login.rc == 0
+    
+    - name: Fail if both login methods unsuccessful
+      fail:
+        msg: |
+          Registry login failed. Cannot proceed with Tyr deployment.
+          
+          Troubleshooting:
+          1. Verify token has 'read:packages' scope: https://github.com/settings/tokens
+          2. Test manually on master node (works in your case):
+             ssh ubuntu@{{ inventory_hostname }}
+             echo 'YOUR_TOKEN' | helm registry login ghcr.io --username {{ tyr_ghcr_username }} --password-stdin
+          3. Check if there are special characters in the token causing shell issues
+          
+          Helm login error: {{ helm_login.stderr | default('Unknown') }}
+          Docker login error: {{ docker_login.stderr | default('Not attempted') if docker_login is defined else 'Not attempted' }}
+      when: helm_login.rc != 0 and (docker_login is not defined or docker_login.rc != 0)
+    
+    - name: Check if tyr-system namespace exists
+      command: kubectl get namespace tyr-system
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      register: namespace_check
+      changed_when: false
+      failed_when: false
+    
+    - name: Create tyr-system namespace
+      command: kubectl create namespace tyr-system
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      when: namespace_check.rc != 0
+      register: namespace_created
+    
+    - name: Display namespace status
+      debug:
+        msg: "✓ Namespace tyr-system {{ 'created' if namespace_created.changed else 'already exists' }}"
+  
+  tags:
+    - configure
+    - namespace
+    - phase2
+
+################################################################################
+# Phase 3: Create Docker Registry Secret
+################################################################################
+- name: Phase 3 - Create Docker Registry Secret
+  hosts: masters[0]
+  become: yes
+  gather_facts: no
+  
+  vars_files:
+    - ../inventory/group_vars/all.yml
+    - ../inventory/group_vars/masters.yml
+  
+  tasks:
+    - name: Check if ghcr-secret exists
+      command: kubectl get secret ghcr-secret -n tyr-system
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      register: secret_check
+      changed_when: false
+      failed_when: false
+    
+    - name: Delete existing ghcr-secret if it exists
+      command: kubectl delete secret ghcr-secret -n tyr-system
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      when: secret_check.rc == 0
+      no_log: true
+    
+    - name: Create docker-registry secret for GHCR
+      command: >
+        kubectl create secret docker-registry ghcr-secret
+        --docker-server=ghcr.io
+        --docker-username={{ tyr_ghcr_username }}
+        --docker-password={{ tyr_ghcr_password }}
+        --namespace=tyr-system
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      no_log: true
+      register: secret_created
+    
+    - name: Display secret status
+      debug:
+        msg: "✓ Docker registry secret 'ghcr-secret' created in tyr-system namespace"
+      when: secret_created.changed
+  
+  tags:
+    - secret
+    - phase3
+
+################################################################################
+# Phase 4: Deploy Tyr using Helm
+################################################################################
+- name: Phase 4 - Deploy Tyr
+  hosts: masters[0]
+  become: yes
+  gather_facts: no
+  
+  vars_files:
+    - ../inventory/group_vars/all.yml
+    - ../inventory/group_vars/masters.yml
+  
+  tasks:
+    - name: Check if Tyr is already installed
+      command: helm list -n tyr-system -o json
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      register: helm_list
+      changed_when: false
+      failed_when: false
+    
+    - name: Parse Helm list output
+      set_fact:
+        tyr_installed: "{{ (helm_list.stdout | from_json | selectattr('name', 'equalto', 'tyr') | list | length) > 0 }}"
+      when: helm_list.rc == 0
+    
+    - name: Set tyr_installed to false if helm list failed
+      set_fact:
+        tyr_installed: false
+      when: helm_list.rc != 0
+    
+    - name: Install Tyr using Helm
+      command: >
+        helm install tyr oci://ghcr.io/ascendra-networks/charts/tyr
+        --version {{ tyr_version }}
+        --namespace tyr-system
+        --create-namespace
+        --set github.createSecret=true
+        --set github.token={{ tyr_ghcr_password }}
+        --set imagePullSecrets[0].name=ghcr-secret
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      when: not tyr_installed
+      no_log: true
+      register: tyr_install
+    
+    - name: Upgrade Tyr using Helm (if already installed)
+      command: >
+        helm upgrade tyr oci://ghcr.io/ascendra-networks/charts/tyr
+        --version {{ tyr_version }}
+        --namespace tyr-system
+        --set github.createSecret=true
+        --set github.token={{ tyr_ghcr_password }}
+        --set imagePullSecrets[0].name=ghcr-secret
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      when: tyr_installed
+      no_log: true
+      register: tyr_upgrade
+    
+    - name: Display Tyr deployment status
+      debug:
+        msg: "✓ Tyr {{ 'installed' if tyr_install.changed else 'upgraded' }} successfully (version: {{ tyr_version }})"
+    
+    - name: Wait for Tyr pods to be ready
+      command: >
+        kubectl wait --for=condition=Ready pods
+        --all -n tyr-system
+        --timeout=300s
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      register: pods_ready
+      changed_when: false
+      failed_when: false
+    
+    - name: Display pod status if wait timed out
+      command: kubectl get pods -n tyr-system
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      register: pod_status
+      when: pods_ready.rc != 0
+      changed_when: false
+    
+    - name: Show pod status
+      debug:
+        msg: "{{ pod_status.stdout_lines }}"
+      when: pods_ready.rc != 0
+  
+  tags:
+    - deploy
+    - phase4
+
+################################################################################
+# Phase 5: Apply InfraManager Custom Resource
+################################################################################
+- name: Phase 5 - Apply InfraManager Instance
+  hosts: masters[0]
+  become: yes
+  gather_facts: no
+  
+  vars_files:
+    - ../inventory/group_vars/all.yml
+    - ../inventory/group_vars/masters.yml
+  
+  tasks:
+    - name: Set default inframanager namespace
+      set_fact:
+        inframanager_namespace: "{{ tyr_inframanager_namespace | default('default') }}"
+    
+    - name: Set default GitHub token secret name
+      set_fact:
+        github_token_secret_name: "{{ tyr_github_token_secret_name | default('gh-token') }}"
+    
+    - name: Set KubeVirt configuration
+      set_fact:
+        kubevirt_image_tag: "{{ tyr_kubevirt_image_tag | default('v1.7.0-ascendra.0') }}"
+        kubevirt_cpu_allocation_ratio: "{{ tyr_kubevirt_cpu_allocation_ratio | default(8) }}"
+        kube_ovn_version: "{{ tyr_kube_ovn_version | default('v1.14.5') }}"
+    
+    - name: Create InfraManager manifest
+      copy:
+        content: |
+          apiVersion: infra.ascendra.cloud/v1alpha1
+          kind: InfraManager
+          metadata:
+            labels:
+              app.kubernetes.io/name: tyr
+              app.kubernetes.io/managed-by: kustomize
+            name: inframanager-sample
+            namespace: {{ inframanager_namespace }}
+          spec:
+            kubeOvn:
+              version: "{{ kube_ovn_version }}"
+            kubeVirt:
+              imageTag: "{{ kubevirt_image_tag }}"
+              imagePullPolicy: Always
+              cpuAllocationRatio: {{ kubevirt_cpu_allocation_ratio }}
+              githubTokenRef:
+                name: {{ github_token_secret_name }}
+                key: token
+              kubeVirtSpec:
+                configuration:
+                  # Migration settings for improved VM live migration
+                  migrations:
+                    autoConverge: true
+                    autoConvergeInitial: 90
+                    autoConvergeIncrement: 50
+                    # SAFE ALTERNATIVE TO POST-COPY:
+                    # This allows the controller to pause the VM to force completion
+                    # when convergence isn't happening naturally.
+                    allowWorkloadDisruption: true
+                    allowPostCopy: false
+                    # REMOVE NETWORK BOTTLENECKS:
+                    # 0 means unlimited bandwidth.
+                    bandwidthPerMigration: 0
+                    # CONTROL THE TIMEOUT:
+                    # Seconds per GiB before the "Pause" strategy is triggered.
+                    completionTimeoutPerGiB: 30
+        dest: /tmp/inframanager.yaml
+        mode: '0644'
+    
+    - name: Apply InfraManager custom resource
+      command: kubectl apply -f /tmp/inframanager.yaml
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      register: inframanager_apply
+    
+    - name: Display InfraManager status
+      debug:
+        msg: "✓ InfraManager custom resource applied successfully"
+      when: inframanager_apply.changed
+    
+    - name: Get InfraManager status
+      command: kubectl get inframanager -n {{ inframanager_namespace }}
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      register: inframanager_status
+      changed_when: false
+      failed_when: false
+    
+    - name: Display InfraManager status
+      debug:
+        msg: "{{ inframanager_status.stdout_lines }}"
+      when: inframanager_status.rc == 0
+    
+    - name: Remove temporary InfraManager manifest
+      file:
+        path: /tmp/inframanager.yaml
+        state: absent
+  
+  tags:
+    - inframanager
+    - phase5
+
+################################################################################
+# Phase 6: Wait for All Components to Be Ready
+################################################################################
+- name: Phase 6 - Verify All Components Running
+  hosts: masters[0]
+  become: yes
+  gather_facts: no
+  
+  vars_files:
+    - ../inventory/group_vars/all.yml
+    - ../inventory/group_vars/masters.yml
+  
+  tasks:
+    # ============================================
+    # Wait for Tyr platform services
+    # ============================================
+    - name: Wait for Tyr platform services to be ready
+      command: >
+        kubectl wait --for=condition=Ready pods
+        --all -n tyr-system
+        --timeout=300s
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      register: tyr_pods_ready
+      changed_when: false
+      retries: 3
+      delay: 30
+      until: tyr_pods_ready.rc == 0
+
+    - name: Verify Tyr platform services are running
+      command: kubectl get pods -n tyr-system --no-headers
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      register: tyr_pods_status
+      changed_when: false
+
+    - name: Check Tyr services health
+      assert:
+        that:
+          - tyr_pods_status.stdout_lines | length > 0
+        fail_msg: "No platform services found in tyr-system"
+        success_msg: "✓ Platform services are running ({{ tyr_pods_status.stdout_lines | length }} services)"
+
+    # ============================================
+    # Wait for virtual compute layer
+    # ============================================
+    - name: Wait for virtual compute namespace to be created
+      command: kubectl get namespace kubevirt
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      register: kubevirt_ns_check
+      changed_when: false
+      retries: 20
+      delay: 15
+      until: kubevirt_ns_check.rc == 0
+
+    - name: Wait for virtual compute components to be ready
+      command: >
+        kubectl wait --for=condition=Ready pods
+        --all -n kubevirt
+        --timeout=600s
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      register: kubevirt_pods_ready
+      changed_when: false
+      retries: 3
+      delay: 30
+      until: kubevirt_pods_ready.rc == 0
+
+    - name: Verify virtual compute components are running
+      command: kubectl get pods -n kubevirt --no-headers
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      register: kubevirt_pods_status
+      changed_when: false
+
+    - name: Check virtual compute health
+      assert:
+        that:
+          - kubevirt_pods_status.stdout_lines | length > 0
+        fail_msg: "Virtual compute components not found"
+        success_msg: "✓ Virtual compute is running ({{ kubevirt_pods_status.stdout_lines | length }} components)"
+
+    # ============================================
+    # Wait for network layer
+    # ============================================
+    - name: Wait for network layer components to be ready
+      shell: |
+        kubectl get pods -n kube-system -l app=kube-ovn-controller --no-headers 2>/dev/null | grep -c "Running"
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      register: kube_ovn_running
+      changed_when: false
+      retries: 20
+      delay: 15
+      until: kube_ovn_running.stdout | int > 0
+      failed_when: false
+
+    - name: Verify network layer components are running
+      shell: |
+        kubectl get pods -n kube-system --no-headers 2>/dev/null | grep -c "kube-ovn"
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      register: kube_ovn_count
+      changed_when: false
+      failed_when: false
+
+    - name: Check network layer health
+      debug:
+        msg: "✓ Network layer is running ({{ kube_ovn_count.stdout | default('0') }} components)"
+
+    # ============================================
+    # Final health check
+    # ============================================
+    - name: Verify all components running - final check
+      shell: |
+        echo "=== Platform Services (tyr-system) ==="
+        kubectl get pods -n tyr-system --no-headers 2>/dev/null | awk '{print $1, $3}'
+        echo ""
+        echo "=== Virtual Compute (kubevirt) ==="
+        kubectl get pods -n kubevirt --no-headers 2>/dev/null | awk '{print $1, $3}'
+        echo ""
+        echo "=== Network (kube-system) ==="
+        kubectl get pods -n kube-system --no-headers 2>/dev/null | grep kube-ovn | awk '{print $1, $3}'
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      register: all_components
+      changed_when: false
+
+    - name: Display deployment summary
+      debug:
+        msg:
+          - "=========================================="
+          - "Infrastructure Configuration Complete!"
+          - "=========================================="
+          - ""
+          - "All components are running:"
+          - "{{ all_components.stdout }}"
+          - ""
+          - "Deployment Details:"
+          - "  - Version: {{ tyr_version }}"
+          - "  - Namespace: tyr-system"
+          - ""
+          - "=========================================="
+  
+  tags:
+    - summary
+    - verification
+    - phase6
+

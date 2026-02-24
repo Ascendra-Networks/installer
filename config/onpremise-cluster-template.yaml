@@ -1,0 +1,161 @@
+# On-Premise Cluster Configuration Template
+# This file defines the structure for deploying Ascendra on existing infrastructure
+
+# ==============================================================================
+# CLUSTER IDENTIFICATION
+# ==============================================================================
+clusterName: "my-onprem-cluster"
+# Must be lowercase alphanumeric with hyphens only
+# This name will be used for inventory files and resource identification
+
+# ==============================================================================
+# CONTROL PLANE NODES
+# ==============================================================================
+# Each node group (including control plane) has its own SSH configuration
+controlPlane:
+  # SSH configuration for control plane nodes
+  sshConfig:
+    # SSH user (must have sudo privileges)
+    user: "ubuntu"
+    
+    # OPTION 1: Use existing SSH private key
+    # Provide the full path to your SSH private key
+    privateKeyPath: "/home/user/.ssh/id_rsa"
+    
+    # OPTION 2: Generate new SSH key pair
+    # Uncomment the line below and remove/comment privateKeyPath
+    # generateNew: true
+    # Note: If generateNew is true, you'll receive a public key to add to all nodes
+  
+  nodes:
+    # Primary master node
+    - ip: "192.168.1.10"
+      hostname: "master-1"  # Optional: custom hostname for inventory
+      osType: "ubuntu"      # Per-node OS: "ubuntu" or "suse"
+    
+    # Additional master nodes for High Availability (optional)
+    # Uncomment below for HA setup
+    # - ip: "192.168.1.11"
+    #   hostname: "master-2"
+    #   osType: "ubuntu"
+    # - ip: "192.168.1.12"
+    #   hostname: "master-3"
+    #   osType: "suse"      # Mixed OS cluster example
+
+# ==============================================================================
+# WORKER NODE GROUPS
+# ==============================================================================
+# You can define multiple worker groups with different labels and taints
+# This allows for workload separation and specialized node pools
+
+workerNodes:
+  # -----------------------------------
+  # General Compute Nodes
+  # -----------------------------------
+  - groupName: "compute-group"
+    # SSH configuration for this node group
+    sshConfig:
+      user: "ubuntu"
+      privateKeyPath: "/home/user/.ssh/id_rsa"
+      # generateNew: true  # Uncomment to generate new key pair
+    labels:
+      node-role: "compute"
+      environment: "production"
+      workload-type: "general"
+    taints: []  # No taints - accept all pods
+    nodes:
+      - ip: "192.168.1.20"
+        hostname: "worker-1"
+        osType: "ubuntu"
+      - ip: "192.168.1.21"
+        hostname: "worker-2"
+        osType: "ubuntu"
+      - ip: "192.168.1.22"
+        hostname: "worker-3"
+        osType: "suse"       # Can mix OS types within a pool
+  
+  # -----------------------------------
+  # Storage Nodes (Example with Taints)
+  # -----------------------------------
+  # Uncomment below for dedicated storage nodes
+  # - groupName: "storage-group"
+  #   sshConfig:
+  #     user: "ubuntu"
+  #     privateKeyPath: "/home/user/.ssh/storage_key"
+  #   labels:
+  #     node-role: "storage"
+  #     storage-type: "high-performance"
+  #   taints:
+  #     - key: "storage"
+  #       value: "true"
+  #       effect: "NoSchedule"  # Options: NoSchedule, PreferNoSchedule, NoExecute
+  #   nodes:
+  #     - ip: "192.168.1.30"
+  #       hostname: "storage-1"
+  #     - ip: "192.168.1.31"
+  #       hostname: "storage-2"
+  
+  # -----------------------------------
+  # GPU Nodes (Example)
+  # -----------------------------------
+  # - groupName: "gpu-group"
+  #   sshConfig:
+  #     user: "ubuntu"
+  #     privateKeyPath: "/home/user/.ssh/id_rsa"
+  #   labels:
+  #     node-role: "gpu"
+  #     gpu-type: "nvidia-tesla"
+  #     accelerator: "cuda"
+  #   taints:
+  #     - key: "nvidia.com/gpu"
+  #       value: "true"
+  #       effect: "NoSchedule"
+  #   nodes:
+  #     - ip: "192.168.1.40"
+  #       hostname: "gpu-1"
+
+# ==============================================================================
+# LABEL AND TAINT REFERENCE
+# ==============================================================================
+
+# LABELS:
+# Labels are key-value pairs attached to nodes for workload scheduling
+# Common label patterns:
+# - node-role: master/worker/storage/compute
+# - environment: production/staging/development
+# - workload-type: general/batch/stateful
+# - availability-zone: zone-a/zone-b
+# - hardware-type: standard/high-memory/high-cpu
+
+# TAINTS:
+# Taints prevent pods from being scheduled on nodes unless they have matching tolerations
+# Taint effects:
+# - NoSchedule: New pods without matching toleration won't be scheduled
+# - PreferNoSchedule: Kubernetes will try to avoid scheduling non-tolerant pods
+# - NoExecute: Evicts running pods without matching toleration
+
+# ==============================================================================
+# PREREQUISITES
+# ==============================================================================
+# Before deploying, ensure:
+# 1. All nodes in each group are accessible via SSH with the provided credentials
+# 2. Each node group's SSH user has sudo privileges on those nodes
+# 3. All nodes are running Ubuntu 20.04+ or SUSE/SLES 15+ (set osType per node)
+# 4. No firewall rules blocking inter-node communication
+# 5. All nodes have unique hostnames
+# 6. All nodes have internet access (for package installation)
+# 7. Minimum requirements per node:
+#    - Control Plane: 2 CPUs, 4GB RAM, 20GB disk
+#    - Worker Nodes: 2 CPUs, 4GB RAM, 50GB disk
+# 8. Different node groups can use different SSH users/keys as needed
+
+# ==============================================================================
+# USAGE
+# ==============================================================================
+# 1. Copy this template and customize with your infrastructure details
+# 2. Upload via the Ascendra Installer UI or use the API:
+#    POST /api/onpremise/validate-config
+# 3. Test SSH connectivity before deployment:
+#    POST /api/onpremise/validate-ssh
+# 4. Proceed with component selection and installation
+

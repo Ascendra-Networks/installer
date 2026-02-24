@@ -1,0 +1,95 @@
+{% for vm_number in range(1, num_vms | int + 1) %}
+{% set vm_name = (vm_base_name | default('vm')) ~ vm_number %}
+{% set vm_hostname = (vm_base_name | default('vm')) ~ vm_number %}
+{% set cloudinit_userdata %}#cloud-config
+hostname: {{ vm_hostname }}
+fqdn: {{ vm_hostname }}.local
+manage_etc_hosts: true
+users:
+  - name: ubuntu
+    sudo: ['ALL=(ALL) NOPASSWD:ALL']
+    groups: sudo
+    shell: /bin/bash
+{% if ssh_public_key is defined %}
+    ssh-authorized-keys:
+      - {{ ssh_public_key }}
+{% endif %}
+  - name: core
+    sudo: ['ALL=(ALL) NOPASSWD:ALL']
+    groups: sudo
+    shell: /bin/bash
+{% if ssh_public_key is defined %}
+    ssh-authorized-keys:
+      - {{ ssh_public_key }}
+{% endif %}
+chpasswd:
+  list: |
+    ubuntu:ubuntu
+    core:core
+  expire: False
+ssh_pwauth: True
+package_update: true
+package_upgrade: false
+packages:
+  - stress-ng
+runcmd:
+  - hostnamectl set-hostname {{ vm_hostname }}
+  - echo "127.0.0.1 {{ vm_hostname }}" >> /etc/hosts
+  - systemctl restart systemd-hostnamed
+  - apt-get install -y stress-ng || yum install -y stress-ng || true{% endset %}
+---
+apiVersion: kubevirt.io/v1
+kind: VirtualMachine
+metadata:
+  name: {{ vm_name }}
+  namespace: {{ vm_namespace | default('default') }}
+  labels:
+    app: {{ vm_name }}
+    kubevirt.io/vm: {{ vm_name }}
+spec:
+  running: true
+  template:
+    metadata:
+      labels:
+        kubevirt.io/vm: {{ vm_name }}
+        app: {{ vm_name }}
+      annotations:
+        kubevirt.io/allow-pod-bridge-network-live-migration: "true"
+    spec:
+      evictionStrategy: LiveMigrate
+      domain:
+        cpu:
+          cores: {{ vm_cpu_cores }}
+        memory:
+          guest: {{ vm_memory_gb }}Gi
+        devices:
+          disks:
+          - name: containerdisk
+            disk:
+              bus: virtio
+          - name: cloudinit
+            disk:
+              bus: virtio
+          interfaces:
+          - name: default
+            bridge: {}
+        machine:
+          type: q35
+        resources:
+          requests:
+            memory: {{ vm_memory_request_mb }}Mi
+            cpu: {{ vm_cpu_request_millicores }}m
+          limits:
+            memory: {{ vm_memory_gb }}Gi
+      networks:
+      - name: default
+        pod: {}
+      volumes:
+      - name: containerdisk
+        containerDisk:
+          image: {{ os_image | default('quay.io/containerdisks/ubuntu:24.04') }}
+      - name: cloudinit
+        cloudInitNoCloud:
+          userDataBase64: "{{ cloudinit_userdata | b64encode }}"
+{% endfor %}
+

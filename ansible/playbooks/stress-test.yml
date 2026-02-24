@@ -1,0 +1,360 @@
+---
+# KubeVirt VM Stress Test - Baseline Test
+# Comprehensive stress testing with flexible configuration
+# Run from master node to test VMs
+
+- name: Run Stress Test on KubeVirt VMs
+  hosts: masters[0]
+  gather_facts: yes
+  become: yes
+
+  vars:
+    # Test Configuration
+    test_type: "cpu"              # cpu, memory, io, combined
+    duration: "60s"               # Test duration (e.g., 60s, 5m, 1h, 0 for infinite)
+    
+    # VM Selection
+    vm_namespace: "default"       # Kubernetes namespace
+    vm_filter: "all"              # all, modulo, list, cpu_threshold
+    vm_list: []                   # Specific VMs: ['vm1', 'vm2'] (when vm_filter=list)
+    vm_modulo: 2                  # Test every Nth VM (when vm_filter=modulo)
+    vm_modulo_remainder: 0        # Offset for modulo (when vm_filter=modulo)
+    cpu_threshold: 50             # Only test VMs below this CPU % (when vm_filter=cpu_threshold)
+    
+    # Stress Parameters
+    cpu_load: 100                 # Target CPU load % (e.g., 50 for 50%, 100 for 100%)
+    cpu_workers: 0                # 0 = auto-calculated from cpu_load, or set specific number
+    memory_workers: 0             # 0 = all memory
+    memory_percent: 80            # % of memory to use
+    io_workers: 4                 # Number of I/O workers
+    
+    # Execution
+    ansible_ssh_user: "ubuntu"    # SSH user for VMs
+    ansible_ssh_pass: "ubuntu"    # SSH password for VMs
+
+  tasks:
+    # ========================================
+    # Step 0: Install Prerequisites
+    # ========================================
+    - name: Install sshpass if not present
+      apt:
+        name: sshpass
+        state: present
+        update_cache: yes
+      when: ansible_os_family == "Debian"
+
+    # ========================================
+    # Step 1: Get VM List
+    # ========================================
+    - name: Get all VMs in namespace
+      shell: kubectl get vmi -n {{ vm_namespace }} -o jsonpath='{.items[*].metadata.name}'
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      register: vmi_output
+      changed_when: false
+
+    - name: Parse VM list
+      set_fact:
+        all_vms: "{{ vmi_output.stdout.split() }}"
+
+    - name: Display total VMs found
+      debug:
+        msg: "Found {{ all_vms | length }} VMs in namespace {{ vm_namespace }}"
+
+    # ========================================
+    # Step 2: Filter VMs Based on Selection
+    # ========================================
+    - name: Filter VMs - All
+      set_fact:
+        selected_vms: "{{ all_vms }}"
+      when: vm_filter == "all"
+
+    - name: Filter VMs - Specific List
+      set_fact:
+        selected_vms: "{{ vm_list }}"
+      when: vm_filter == "list"
+
+    - name: Filter VMs - Modulo
+      set_fact:
+        selected_vms: |
+          {% set result = [] %}
+          {% for vm in all_vms %}
+            {% set vm_num = vm | regex_replace('[^0-9]', '') | int %}
+            {% if (vm_num % vm_modulo) == vm_modulo_remainder %}
+              {% set _ = result.append(vm) %}
+            {% endif %}
+          {% endfor %}
+          {{ result }}
+      when: vm_filter == "modulo"
+
+    - name: Filter VMs - CPU Threshold
+      block:
+        - name: Get VM CPU usage
+          shell: |
+            for vm in {{ all_vms | join(' ') }}; do
+              POD=$(kubectl get pods -n {{ vm_namespace }} -l kubevirt.io/vm=$vm -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+              if [ -n "$POD" ]; then
+                CPU=$(kubectl top pod $POD -n {{ vm_namespace }} --no-headers 2>/dev/null | awk '{print $2}' || echo "0m")
+                echo "$vm:$CPU"
+              fi
+            done
+          environment:
+            KUBECONFIG: /etc/kubernetes/admin.conf
+          register: vm_cpu_usage
+          changed_when: false
+
+        - name: Select VMs below CPU threshold
+          set_fact:
+            selected_vms: |
+              {% set result = [] %}
+              {% for line in vm_cpu_usage.stdout_lines %}
+                {% set vm_name = line.split(':')[0] %}
+                {% set cpu_str = line.split(':')[1] %}
+                {% set cpu_val = cpu_str | regex_replace('m', '') | int %}
+                {% if cpu_val < (cpu_threshold * 10) %}
+                  {% set _ = result.append(vm_name) %}
+                {% endif %}
+              {% endfor %}
+              {{ result }}
+      when: vm_filter == "cpu_threshold"
+
+    - name: Display selected VMs
+      debug:
+        msg:
+          - "Selection method: {{ vm_filter }}"
+          - "Selected {{ selected_vms | length }} VMs: {{ selected_vms | join(', ') }}"
+
+    - name: Fail if no VMs selected
+      fail:
+        msg: "No VMs selected for testing"
+      when: selected_vms | length == 0
+
+    # ========================================
+    # Step 3: Get VM IP Addresses and CPU Info
+    # ========================================
+    - name: Get all VM IP addresses and CPU cores in one command
+      shell: |
+        kubectl get vmi -n {{ vm_namespace }} -o json | jq -r '
+          .items[] | 
+          "\(.metadata.name):\(.status.interfaces[0].ipAddress):\(.spec.domain.cpu.cores)"
+        '
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      register: vm_info_all
+      changed_when: false
+
+    - name: Create VM inventory with CPU info (filter selected VMs)
+      set_fact:
+        vm_inventory_raw: |
+          {% set result = [] %}
+          {% for line in vm_info_all.stdout_lines %}
+            {% set parts = line.split(':') %}
+            {% set name = parts[0] %}
+            {% if name in selected_vms %}
+              {% set ip = parts[1] %}
+              {% set cpus = parts[2] | int %}
+              {% set workers = cpu_workers | int %}
+              {% if workers == 0 %}
+                {% set target_load = cpu_load | int %}
+                {% set calc_workers = ((cpus * target_load / 100) | round(0, 'ceil')) | int %}
+                {% if calc_workers < 1 %}
+                  {% set workers = 1 %}
+                {% else %}
+                  {% set workers = calc_workers %}
+                {% endif %}
+              {% endif %}
+              {% set _ = result.append({
+                'name': name,
+                'ip': ip,
+                'cpus': cpus,
+                'workers': workers
+              }) %}
+            {% endif %}
+          {% endfor %}
+          {{ result }}
+
+    - name: Parse VM inventory
+      set_fact:
+        vm_inventory: "{{ vm_inventory_raw | trim | from_yaml }}"
+
+    - name: Display VM inventory
+      debug:
+        msg: "{{ item.name }}: {{ item.ip }} ({{ item.cpus }} CPUs, will stress {{ item.workers }} workers for {{ cpu_load }}% load)"
+      loop: "{{ vm_inventory }}"
+
+    # ========================================
+    # Step 4: Install stress-ng on VMs
+    # ========================================
+    - name: Check if stress-ng is installed on VMs (true parallel - all at once)
+      shell: |
+        # Launch all SSH checks in background
+        {% for vm in vm_inventory %}
+        (sshpass -p '{{ ansible_ssh_pass }}' ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 \
+          {{ ansible_ssh_user }}@{{ vm.ip }} 'which stress-ng 2>/dev/null || echo "not_found"' \
+          > /tmp/stress_check_{{ vm.name }}.txt 2>&1) &
+        {% endfor %}
+        # Wait for all background jobs
+        wait
+        # Output results
+        {% for vm in vm_inventory %}
+        echo "{{ vm.name }}:{{ vm.ip }}:$(cat /tmp/stress_check_{{ vm.name }}.txt | tail -1)"
+        {% endfor %}
+      register: stress_check_output
+      changed_when: false
+      failed_when: false
+
+    - name: Parse stress-ng check results
+      set_fact:
+        vms_need_install_raw: |
+          {% set result = [] %}
+          {% for line in stress_check_output.stdout_lines %}
+            {% set parts = line.split(':') %}
+            {% if parts | length >= 3 and 'not_found' in parts[2] %}
+              {% set _ = result.append({'name': parts[0], 'ip': parts[1]}) %}
+            {% endif %}
+          {% endfor %}
+          {{ result }}
+
+    - name: Convert to proper list
+      set_fact:
+        vms_need_install: "{{ vms_need_install_raw | trim | from_yaml }}"
+
+    - name: Display VMs that need stress-ng installation
+      debug:
+        msg: "{{ vms_need_install | length }} VMs need stress-ng installation"
+
+    - name: Install stress-ng on VMs that need it (true parallel - all at once)
+      shell: |
+        # Launch all installations in background
+        {% for vm in vms_need_install %}
+        (sshpass -p '{{ ansible_ssh_pass }}' ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 \
+          {{ ansible_ssh_user }}@{{ vm.ip }} \
+          'echo {{ ansible_ssh_pass }} | sudo -S sh -c "apt-get update -qq && apt-get install -y stress-ng"' \
+          > /tmp/stress_install_{{ vm.name }}.log 2>&1) &
+        {% endfor %}
+        # Wait for all installations
+        wait
+        echo "Installation complete"
+      register: install_result
+      changed_when: true
+      when: vms_need_install | length > 0
+      async: 600
+      poll: 0
+
+    - name: Wait for stress-ng installation to complete
+      async_status:
+        jid: "{{ install_result.ansible_job_id }}"
+      register: install_status
+      until: install_status.finished
+      retries: 120
+      delay: 5
+      when: vms_need_install | length > 0
+
+    # ========================================
+    # Step 5: Run Stress Test
+    # ========================================
+    - name: Calculate timeout from duration
+      set_fact:
+        timeout_value: "{{ duration }}"
+        duration_for_pause: |
+          {% set dur = duration %}
+          {% if 's' in dur %}
+            {{ dur | regex_replace('s', '') | int }}
+          {% elif 'm' in dur %}
+            {{ (dur | regex_replace('m', '') | int) * 60 }}
+          {% elif 'h' in dur %}
+            {{ (dur | regex_replace('h', '') | int) * 3600 }}
+          {% else %}
+            {{ dur | int }}
+          {% endif %}
+
+    - name: Parse duration for pause
+      set_fact:
+        duration_seconds: "{{ duration_for_pause | trim | int }}"
+
+    - name: Display test configuration
+      debug:
+        msg:
+          - "=== Stress Test Configuration ==="
+          - "Test type: {{ test_type }}"
+          - "Duration: {{ duration }} ({{ duration_seconds }} seconds)"
+          - "CPU Load Target: {{ cpu_load }}%"
+          - "VMs: {{ selected_vms | length }}"
+
+    - name: Start stress test on all VMs (true parallel - all at once)
+      shell: |
+        # Launch stress test on all VMs in parallel
+        {% for vm in vm_inventory %}
+        {% if test_type == "cpu" %}
+        CMD="stress-ng --cpu {{ vm.workers }} --timeout {{ duration }} --metrics-brief"
+        {% elif test_type == "memory" %}
+        CMD="stress-ng --vm {{ memory_workers }} --vm-bytes {{ memory_percent }}% --timeout {{ duration }} --metrics-brief"
+        {% elif test_type == "io" %}
+        CMD="stress-ng --io {{ io_workers }} --hdd 4 --timeout {{ duration }} --metrics-brief"
+        {% elif test_type == "combined" %}
+        CMD="stress-ng --cpu {{ vm.workers }} --vm {{ memory_workers }} --vm-bytes {{ memory_percent }}% --io {{ io_workers }} --timeout {{ duration }} --metrics-brief"
+        {% endif %}
+        (sshpass -p '{{ ansible_ssh_pass }}' ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 \
+          {{ ansible_ssh_user }}@{{ vm.ip }} \
+          "nohup sudo $CMD > /tmp/stress-test.log 2>&1 &" \
+          > /tmp/stress_start_{{ vm.name }}.log 2>&1) &
+        {% endfor %}
+        # Wait for all SSH commands to complete
+        wait
+        echo "Stress test started on all VMs"
+      register: stress_start
+      changed_when: true
+
+    - name: Display stress test started
+      debug:
+        msg: "✓ Stress test started on {{ selected_vms | length }} VMs"
+
+    # ========================================
+    # Step 6: Monitor (Optional)
+    # ========================================
+    - name: Wait for stress test duration
+      pause:
+        seconds: "{{ duration_seconds }}"
+      when: duration_seconds | int > 0
+
+    - name: Check stress test status (true parallel - all at once)
+      shell: |
+        # Check status on all VMs in parallel
+        {% for vm in vm_inventory %}
+        (sshpass -p '{{ ansible_ssh_pass }}' ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 \
+          {{ ansible_ssh_user }}@{{ vm.ip }} 'pgrep -a stress-ng 2>/dev/null || echo "not running"' \
+          > /tmp/stress_status_{{ vm.name }}.txt 2>&1) &
+        {% endfor %}
+        # Wait for all checks
+        wait
+        # Output results
+        {% for vm in vm_inventory %}
+        STATUS=$(cat /tmp/stress_status_{{ vm.name }}.txt 2>/dev/null | head -1)
+        echo "{{ vm.name }}:$STATUS"
+        {% endfor %}
+      register: stress_status_output
+      changed_when: false
+      failed_when: false
+      when: duration != "0" and duration != "0s"
+
+    - name: Display stress test status
+      debug:
+        msg: "{{ item.split(':')[0] }}: {{ 'Running' if 'stress-ng' in item else 'Completed' }}"
+      loop: "{{ stress_status_output.stdout_lines }}"
+      when: stress_status_output.stdout_lines is defined
+
+    # ========================================
+    # Step 7: Summary
+    # ========================================
+    - name: Display completion summary
+      debug:
+        msg:
+          - "=== Stress Test Summary ==="
+          - "Test type: {{ test_type }}"
+          - "Duration: {{ duration }}"
+          - "VMs tested: {{ selected_vms | length }}"
+          - "VMs: {{ selected_vms | join(', ') }}"
+          - ""
+          - "To check VM CPU usage: kubectl top pods -l kubevirt.io=virt-launcher"
+          - "To stop test: ansible-playbook -i inventory/dev.ini playbooks/stop-stress.yml"
+

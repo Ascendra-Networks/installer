@@ -1,0 +1,9 @@
+---
+# Variables specific to Kubernetes master (control plane) nodes
+
+# Kubeconfig paths
+kubeconfig_dir: "/home/{{ ansible_user }}/.kube"
+admin_kubeconfig: "/etc/kubernetes/admin.conf"
+
+# Token configuration for workers to join
+token_ttl: "24h"

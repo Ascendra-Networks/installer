@@ -1,0 +1,38 @@
+{
+  "version": "1.0.0",
+  "description": "Shared configuration defaults for Ascendra cluster deployment - used by both Terraform and UI",
+  "network": {
+    "vpc": {
+      "cidr": "10.0.0.0/16",
+      "nameSuffix": "-vpc",
+      "enableDnsHostnames": true,
+      "enableDnsSupport": true
+    },
+    "subnet": {
+      "cidr": "10.0.1.0/24",
+      "nameSuffix": "-subnet",
+      "mapPublicIpOnLaunch": true
+    }
+  },
+  "compute": {
+    "master": {
+      "instanceType": "t3.large",
+      "diskSize": 100,
+      "diskType": "gp3"
+    },
+    "worker": {
+      "defaultInstanceType": "t3.large",
+      "diskSize": 100,
+      "diskType": "gp3"
+    }
+  },
+  "ssh": {
+    "keyAlgorithm": "RSA",
+    "keyBits": 4096
+  },
+  "tags": {
+    "managedBy": "Ascendra-Installer"
+  }
+}
+
+

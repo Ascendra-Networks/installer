@@ -1,0 +1,88 @@
+{
+  "currentStep": 5,
+  "cloudProvider": "on-premise",
+  "clusterConfig": {
+    "name": "demo",
+    "region": "",
+    "vpc": "",
+    "subnet": "",
+    "nodePools": []
+  },
+  "onPremiseConfig": {
+    "clusterName": "demo",
+    "controlPlane": {
+      "sshConfig": {
+        "user": "asc",
+        "password": "asc123"
+      },
+      "nodes": [
+        {
+          "ip": "192.168.10.17",
+          "hostname": "master",
+          "osType": "ubuntu"
+        }
+      ]
+    },
+    "workerNodes": [
+      {
+        "groupName": "node-pool",
+        "sshConfig": {
+          "user": "asc",
+          "password": "asc123"
+        },
+        "labels": {},
+        "taints": [],
+        "nodes": [
+          {
+            "ip": "192.168.10.33",
+            "hostname": "worker1",
+            "osType": "ubuntu"
+          },
+          {
+            "ip": "192.168.10.25",
+            "hostname": "worker2",
+            "osType": "ubuntu"
+          }
+        ],
+        "envVars": []
+      }
+    ]
+  },
+  "selectedComponents": {
+    "dashboard": true
+  },
+  "clusterCreationProgress": 100,
+  "clusterCreationStatus": "completed",
+  "clusterCreationMessage": "Deployment completed successfully",
+  "clusterCreationPhase": "ansible",
+  "clusterCreationStep": "tyr_complete",
+  "clusterCreationPlaybook": "tyr-deploy",
+  "deploymentSubSteps": [
+    {
+      "id": "cluster",
+      "status": "completed",
+      "message": "",
+      "attempt": 1,
+      "maxAttempts": 3
+    },
+    {
+      "id": "configuration",
+      "status": "completed",
+      "message": "",
+      "attempt": 2,
+      "maxAttempts": 3
+    }
+  ],
+  "installationProgress": [
+    {
+      "componentId": "dashboard",
+      "status": "completed",
+      "progress": 100,
+      "message": "Management Dashboard deployed successfully"
+    }
+  ],
+  "dashboardUrl": "http://192.168.10.17:30080",
+  "isComplete": true,
+  "deploymentId": "4fb98b8d-0aa3-454b-b87f-2f41dcc28e28",
+  "savedAt": "2026-02-24T07:39:32.713Z"
+}

@@ -1,0 +1,21 @@
+# Environment and secrets
+.env
+.env.*
+!.env.example
+*.pem
+**/vault.yml
+!**/vault.yml.example
+
+# Terraform
+*.tfstate
+*.tfstate.*
+.terraform/
+*.tfplan
+crash.*.tfstate
+
+# Ansible
+*.retry
+
+# IDE and OS
+.DS_Store
+Thumbs.db

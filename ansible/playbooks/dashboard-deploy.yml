@@ -1,0 +1,373 @@
+---
+# Playbook for deploying Management Dashboard on Kubernetes cluster
+# Deploys local-path storage, InfluxDB credentials, and the management-dashboard Helm chart
+
+################################################################################
+# Phase 1: Create Monitoring Namespace and Registry Secret
+################################################################################
+- name: Phase 1 - Setup Monitoring Namespace
+  hosts: masters[0]
+  become: yes
+  gather_facts: no
+
+  vars_files:
+    - ../inventory/group_vars/all.yml
+    - ../inventory/group_vars/masters.yml
+
+  tasks:
+    - name: Verify required variables are defined
+      assert:
+        that:
+          - tyr_ghcr_username is defined
+          - tyr_ghcr_password is defined
+          - dashboard_version is defined
+        fail_msg: "Required variables not defined. Please set tyr_ghcr_username, tyr_ghcr_password, and dashboard_version"
+        success_msg: "✓ All required variables are defined"
+
+    - name: Check if monitoring namespace exists
+      command: kubectl get namespace monitoring
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      register: monitoring_ns_check
+      changed_when: false
+      failed_when: false
+
+    - name: Create monitoring namespace
+      command: kubectl create namespace monitoring
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      when: monitoring_ns_check.rc != 0
+
+    - name: Display namespace status
+      debug:
+        msg: "✓ Namespace monitoring {{ 'created' if monitoring_ns_check.rc != 0 else 'already exists' }}"
+
+    - name: Check if ghcr-secret exists in monitoring
+      command: kubectl get secret ghcr-secret -n monitoring
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      register: monitoring_secret_check
+      changed_when: false
+      failed_when: false
+
+    - name: Delete existing ghcr-secret in monitoring
+      command: kubectl delete secret ghcr-secret -n monitoring
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      when: monitoring_secret_check.rc == 0
+      no_log: true
+
+    - name: Create docker-registry secret for GHCR in monitoring
+      command: >
+        kubectl create secret docker-registry ghcr-secret
+        --docker-server=ghcr.io
+        --docker-username={{ tyr_ghcr_username }}
+        --docker-password={{ tyr_ghcr_password }}
+        --namespace=monitoring
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      no_log: true
+
+    - name: Display secret status
+      debug:
+        msg: "✓ Docker registry secret 'ghcr-secret' created in monitoring namespace"
+
+  tags:
+    - namespace
+    - secret
+    - phase1
+
+################################################################################
+# Phase 2: Setup Local-Path Storage Provisioner
+################################################################################
+- name: Phase 2 - Setup Storage
+  hosts: masters[0]
+  become: yes
+  gather_facts: no
+
+  vars_files:
+    - ../inventory/group_vars/all.yml
+    - ../inventory/group_vars/masters.yml
+
+  tasks:
+    - name: Apply local-path-provisioner
+      command: >
+        kubectl apply -f
+        https://raw.githubusercontent.com/rancher/local-path-provisioner/v0.0.34/deploy/local-path-storage.yaml
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      register: local_path_apply
+
+    - name: Display local-path-provisioner status
+      debug:
+        msg: "✓ Local-path-provisioner applied"
+
+    - name: Patch local-path storageclass as default
+      shell: >
+        kubectl patch storageclass local-path -p
+        '{"metadata":{"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}'
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      register: storageclass_patch
+      changed_when: "'patched' in storageclass_patch.stdout"
+      failed_when: false
+
+    - name: Display storageclass status
+      debug:
+        msg: "✓ local-path set as default StorageClass"
+
+  tags:
+    - storage
+    - phase2
+
+################################################################################
+# Phase 3: Helm Registry Login
+################################################################################
+- name: Phase 3 - Helm Registry Login
+  hosts: masters[0]
+  become: yes
+  gather_facts: no
+
+  vars_files:
+    - ../inventory/group_vars/all.yml
+    - ../inventory/group_vars/masters.yml
+
+  tasks:
+    - name: Login to GHCR with Helm
+      shell: |
+        echo '{{ tyr_ghcr_password }}' | helm registry login ghcr.io --username {{ tyr_ghcr_username }} --password-stdin
+      register: helm_login
+      changed_when: "'Login Succeeded' in helm_login.stdout"
+      failed_when: false
+      no_log: true
+
+    - name: Login to Docker registry as fallback
+      shell: |
+        echo '{{ tyr_ghcr_password }}' | docker login ghcr.io --username {{ tyr_ghcr_username }} --password-stdin
+      register: docker_login
+      changed_when: false
+      failed_when: false
+      no_log: true
+      when: helm_login.rc != 0
+
+    - name: Display Helm login status
+      debug:
+        msg: "✓ Successfully logged in to ghcr.io with Helm"
+      when: helm_login.rc == 0
+
+    - name: Fail if both login methods unsuccessful
+      fail:
+        msg: |
+          Registry login failed. Cannot proceed with Dashboard deployment.
+
+          Troubleshooting:
+          1. Verify token has 'read:packages' scope: https://github.com/settings/tokens
+          2. Test manually on master node:
+             ssh ubuntu@{{ inventory_hostname }}
+             echo 'YOUR_TOKEN' | helm registry login ghcr.io --username {{ tyr_ghcr_username }} --password-stdin
+
+          Helm login error: {{ helm_login.stderr | default('Unknown') }}
+          Docker login error: {{ docker_login.stderr | default('Not attempted') if docker_login is defined else 'Not attempted' }}
+      when: helm_login.rc != 0 and (docker_login is not defined or docker_login.rc != 0)
+
+  tags:
+    - helm-login
+    - phase3
+
+################################################################################
+# Phase 4: Create InfluxDB Credentials
+################################################################################
+- name: Phase 4 - Create InfluxDB Credentials
+  hosts: masters[0]
+  become: yes
+  gather_facts: no
+
+  vars_files:
+    - ../inventory/group_vars/all.yml
+    - ../inventory/group_vars/masters.yml
+
+  tasks:
+    - name: Check if influxdb-credentials secret exists
+      command: kubectl get secret influxdb-credentials -n monitoring
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      register: influxdb_secret_check
+      changed_when: false
+      failed_when: false
+
+    - name: Create InfluxDB credentials secret
+      shell: |
+        kubectl create secret generic influxdb-credentials \
+          --namespace monitoring \
+          --from-literal=INFLUXDB_PASSWORD="$(openssl rand -base64 24)" \
+          --from-literal=INFLUXDB_TOKEN="$(openssl rand -base64 36)" \
+          --from-literal=CREDENTIAL_ENCRYPTION_KEY="$(openssl rand -base64 32)"
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      when: influxdb_secret_check.rc != 0
+      no_log: true
+
+    - name: Display InfluxDB credentials status
+      debug:
+        msg: "✓ InfluxDB credentials {{ 'created' if influxdb_secret_check.rc != 0 else 'already exist' }}"
+
+  tags:
+    - influxdb
+    - phase4
+
+################################################################################
+# Phase 5: Deploy Management Dashboard via Helm
+################################################################################
+- name: Phase 5 - Deploy Management Dashboard
+  hosts: masters[0]
+  become: yes
+  gather_facts: no
+
+  vars_files:
+    - ../inventory/group_vars/all.yml
+    - ../inventory/group_vars/masters.yml
+
+  tasks:
+    - name: Check if management-dashboard is already installed
+      command: helm list -n monitoring -o json
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      register: helm_list
+      changed_when: false
+      failed_when: false
+
+    - name: Parse Helm list output
+      set_fact:
+        dashboard_installed: "{{ (helm_list.stdout | from_json | selectattr('name', 'equalto', 'management-dashboard') | list | length) > 0 }}"
+      when: helm_list.rc == 0
+
+    - name: Set dashboard_installed to false if helm list failed
+      set_fact:
+        dashboard_installed: false
+      when: helm_list.rc != 0
+
+    - name: Install Management Dashboard using Helm
+      command: >
+        helm install management-dashboard oci://ghcr.io/ascendra-networks/charts/management-dashboard
+        --version {{ dashboard_version }}
+        --namespace monitoring
+        --create-namespace
+        --set github.createSecret=true
+        --set github.token={{ tyr_ghcr_password }}
+        --set imagePullSecrets[0].name=ghcr-secret
+        --set backend.backend.imagePullSecrets[0].name=ghcr-secret
+        --set ui.ui.imagePullSecrets[0].name=ghcr-secret
+        --set data-collector.imagePullSecrets[0].name=ghcr-secret
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      when: not dashboard_installed
+      no_log: true
+      register: dashboard_install
+
+    - name: Upgrade Management Dashboard using Helm (if already installed)
+      command: >
+        helm upgrade management-dashboard oci://ghcr.io/ascendra-networks/charts/management-dashboard
+        --version {{ dashboard_version }}
+        --namespace monitoring
+        --set github.createSecret=true
+        --set github.token={{ tyr_ghcr_password }}
+        --set imagePullSecrets[0].name=ghcr-secret
+        --set backend.backend.imagePullSecrets[0].name=ghcr-secret
+        --set ui.ui.imagePullSecrets[0].name=ghcr-secret
+        --set data-collector.imagePullSecrets[0].name=ghcr-secret
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      when: dashboard_installed
+      no_log: true
+      register: dashboard_upgrade
+
+    - name: Display Dashboard deployment status
+      debug:
+        msg: "✓ Management Dashboard {{ 'installed' if not dashboard_installed else 'upgraded' }} successfully (version: {{ dashboard_version }})"
+
+  tags:
+    - deploy
+    - phase5
+
+################################################################################
+# Phase 6: Wait for Core Dashboard Services to Be Ready
+################################################################################
+- name: Phase 6 - Verify Dashboard Running
+  hosts: masters[0]
+  become: yes
+  gather_facts: no
+
+  vars_files:
+    - ../inventory/group_vars/all.yml
+    - ../inventory/group_vars/masters.yml
+
+  vars:
+    dashboard_core_deployments:
+      - management-dashboard-backend
+      - ui
+      - influxdb
+      - sqlite-query
+
+  tasks:
+    - name: Wait for {{ item }} deployment to be ready
+      command: >
+        kubectl rollout status deployment/{{ item }}
+        -n monitoring --timeout=300s
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      register: rollout_result
+      changed_when: false
+      retries: 3
+      delay: 15
+      until: rollout_result.rc == 0
+      loop: "{{ dashboard_core_deployments }}"
+
+    - name: Get all pods in monitoring namespace
+      command: kubectl get pods -n monitoring --no-headers
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      register: dashboard_pods_status
+      changed_when: false
+
+    - name: Get UI pod node IP and service port
+      shell: |
+        NODE_IP=$(kubectl get pod -n monitoring -l app.kubernetes.io/name=ui -o jsonpath='{.items[0].status.hostIP}' 2>/dev/null || echo "")
+        if [ -z "$NODE_IP" ]; then
+          NODE_IP=$(kubectl get pod -n monitoring -l app=ui -o jsonpath='{.items[0].status.hostIP}' 2>/dev/null || echo "")
+        fi
+        if [ -z "$NODE_IP" ]; then
+          NODE_IP=$(kubectl get pod -n monitoring $(kubectl get pods -n monitoring --no-headers | grep '^ui-' | head -1 | awk '{print $1}') -o jsonpath='{.status.hostIP}' 2>/dev/null || echo "")
+        fi
+        SVC_TYPE=$(kubectl get svc ui -n monitoring -o jsonpath='{.spec.type}' 2>/dev/null || echo "")
+        NODE_PORT=$(kubectl get svc ui -n monitoring -o jsonpath='{.spec.ports[0].nodePort}' 2>/dev/null || echo "")
+        CLUSTER_IP_PORT=$(kubectl get svc ui -n monitoring -o jsonpath='{.spec.ports[0].port}' 2>/dev/null || echo "80")
+        if [ "$SVC_TYPE" = "NodePort" ] && [ -n "$NODE_PORT" ]; then
+          echo "DASHBOARD_ACCESS_URL=http://${NODE_IP}:${NODE_PORT}"
+        else
+          echo "DASHBOARD_ACCESS_URL=http://${NODE_IP}:${CLUSTER_IP_PORT}"
+        fi
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      register: dashboard_access_info
+      changed_when: false
+
+    - name: Display deployment summary
+      debug:
+        msg:
+          - "=========================================="
+          - "Management Dashboard Deployment Complete!"
+          - "=========================================="
+          - ""
+          - "Dashboard pods:"
+          - "{{ dashboard_pods_status.stdout }}"
+          - ""
+          - "Deployment Details:"
+          - "  - Version: {{ dashboard_version }}"
+          - "  - Namespace: monitoring"
+          - "  - {{ dashboard_access_info.stdout }}"
+          - ""
+          - "=========================================="
+
+  tags:
+    - verification
+    - phase6

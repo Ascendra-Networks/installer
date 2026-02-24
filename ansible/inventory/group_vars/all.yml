@@ -1,0 +1,26 @@
+kubernetes_version: '1.31'
+os_type: ubuntu
+containerd_config_dir: /etc/containerd
+containerd_config_file: '{{ containerd_config_dir }}/config.toml'
+pod_network_cidr: 10.10.0.0/16
+service_cidr: 10.96.0.0/12
+kernel_modules:
+  - overlay
+  - br_netfilter
+sysctl_config:
+  net.bridge.bridge-nf-call-iptables: 1
+  net.bridge.bridge-nf-call-ip6tables: 1
+  net.ipv4.ip_forward: 1
+disable_swap: true
+skip_kube_proxy: false
+tyr_ghcr_username: USERNAME
+tyr_ghcr_password: PASSWORD
+tyr_version: 1.0.4
+tyr_inframanager_namespace: tyr-system
+tyr_github_token_secret_name: tyr-github
+tyr_kubevirt_image_tag: v1.7.0-ascendra.0
+tyr_kubevirt_cpu_allocation_ratio: 8
+tyr_kube_ovn_version: v1.14.5
+dashboard_version: 1.0.26
+cluster_env_vars:
+  cluster: '123'

@@ -1,0 +1,234 @@
+---
+# KubeVirt VM Deployment Playbook
+# Generates and deploys VMs based on overcommit ratios and available resources
+
+- name: Deploy KubeVirt VMs with Resource Overcommit
+  hosts: masters[0]  # Run on first master node with kubectl access
+  gather_facts: yes
+  become: yes
+
+  tasks:
+    - name: Load KubeVirt VM configuration
+      include_vars:
+        file: "../group_vars/kubevirt-vms.yml"
+
+    - name: Validate required parameters
+      assert:
+        that:
+          - cpu_overcommit is defined
+          - memory_overcommit is defined
+          - total_cpu_cores is defined
+          - total_memory_gb is defined
+          - vm_cpu_cores is defined
+          - vm_memory_gb is defined
+          - cpu_overcommit | int > 0
+          - memory_overcommit | int > 0
+          - total_cpu_cores | int > 0
+          - total_memory_gb | int > 0
+          - vm_cpu_cores | int > 0
+          - vm_memory_gb | int > 0
+        fail_msg: "Missing or invalid resource parameters. Check group_vars/kubevirt-vms.yml"
+
+    - name: Calculate maximum number of VMs based on CPU
+      set_fact:
+        max_vms_by_cpu: "{{ ((total_cpu_cores | float) * (cpu_overcommit | float) / (vm_cpu_cores | float)) | int }}"
+
+    - name: Calculate maximum number of VMs based on memory
+      set_fact:
+        max_vms_by_memory: "{{ ((total_memory_gb | float) * (memory_overcommit | float) / (vm_memory_gb | float)) | int }}"
+
+    - name: Determine actual number of VMs to create
+      set_fact:
+        num_vms: "{{ [max_vms_by_cpu | int, max_vms_by_memory | int] | min }}"
+
+    - name: Calculate resource requests
+      set_fact:
+        vm_memory_request_mb: "{{ ((vm_memory_gb | float * 1024) / (memory_overcommit | float)) | int }}"
+        vm_cpu_request_millicores: "{{ ((vm_cpu_cores | float * 1000) / (cpu_overcommit | float)) | int }}"
+
+    - name: Display resource calculation
+      debug:
+        msg:
+          - "=== Resource Calculation ==="
+          - "CPU Overcommit: {{ cpu_overcommit }}x"
+          - "Memory Overcommit: {{ memory_overcommit }}x"
+          - ""
+          - "Total Available Resources:"
+          - "  CPU: {{ total_cpu_cores }} cores"
+          - "  Memory: {{ total_memory_gb }} GB"
+          - ""
+          - "Per-VM Allocation:"
+          - "  CPU Limit: {{ vm_cpu_cores }} cores"
+          - "  CPU Request: {{ vm_cpu_request_millicores }}m"
+          - "  Memory Limit: {{ vm_memory_gb }}Gi"
+          - "  Memory Request: {{ vm_memory_request_mb }}Mi"
+          - ""
+          - "Maximum VMs:"
+          - "  By CPU: {{ max_vms_by_cpu }}"
+          - "  By Memory: {{ max_vms_by_memory }}"
+          - ""
+          - "VMs to Create: {{ num_vms }}"
+          - "Storage: ContainerDisk (ephemeral)"
+          - "OS Image: {{ os_image | default('quay.io/containerdisks/ubuntu:24.04') }}"
+
+    - name: Fail if no VMs can be created
+      fail:
+        msg: "Insufficient resources to create any VMs with current configuration"
+      when: num_vms | int == 0
+
+    - name: Create output directory
+      file:
+        path: "/tmp/kubevirt-vms"
+        state: directory
+        mode: '0755'
+
+    - name: Set SSH key file path
+      set_fact:
+        ssh_key_path: "{{ ssh_key_file if (ssh_key_file is defined and ssh_key_file != '') else (lookup('env', 'HOME') + '/.ssh/id_rsa.pub') }}"
+
+    - name: Check if SSH key file exists
+      stat:
+        path: "{{ ssh_key_path }}"
+      register: ssh_key_stat
+
+    - name: Read SSH public key
+      set_fact:
+        ssh_public_key: "{{ lookup('file', ssh_key_path) }}"
+      when: ssh_key_stat.stat.exists
+
+    - name: Generate all VM manifests in single file
+      template:
+        src: ../templates/kubevirt-vms-all.yml.j2
+        dest: "/tmp/kubevirt-vms/all-vms.yaml"
+
+    - name: Display generated manifest location
+      debug:
+        msg: "Generated manifest file: /tmp/kubevirt-vms/all-vms.yaml with {{ num_vms }} VMs"
+
+    - name: Apply VM manifests to Kubernetes
+      command: kubectl apply -f /tmp/kubevirt-vms/all-vms.yaml
+      register: apply_output
+
+    - name: Display apply output
+      debug:
+        var: apply_output.stdout_lines
+
+    - name: Wait for VMs to be created
+      command: kubectl get vms -n {{ vm_namespace | default('default') }}
+      register: vms_status
+      until: vms_status.rc == 0
+      retries: 5
+      delay: 10
+
+    - name: Display VM status
+      debug:
+        var: vms_status.stdout_lines
+
+    - name: Wait a moment for VMIs to start
+      pause:
+        seconds: 5
+
+    - name: Get VMI status
+      command: kubectl get vmis -n {{ vm_namespace | default('default') }}
+      register: vmis_status
+      ignore_errors: yes
+
+    - name: Display VMI status
+      debug:
+        var: vmis_status.stdout_lines
+      when: vmis_status.rc == 0
+
+    - name: Display access information
+      debug:
+        msg:
+          - "=== VM Deployment Complete ==="
+          - "Number of VMs created: {{ num_vms }}"
+          - "VM name pattern: {{ vm_base_name | default('vm') }}1 to {{ vm_base_name | default('vm') }}{{ num_vms }}"
+          - ""
+          - "Access VMs with:"
+          - "  virtctl console {{ vm_base_name | default('vm') }}1"
+          - "  virtctl ssh ubuntu@{{ vm_base_name | default('vm') }}1"
+          - ""
+          - "Default credentials:"
+          - "  ubuntu:ubuntu"
+          - "  core:core"
+          - ""
+          - "Check VM status:"
+          - "  kubectl get vms -n {{ vm_namespace | default('default') }}"
+          - "  kubectl get vmis -n {{ vm_namespace | default('default') }}"
+
+    - name: Wait for VMIs to be running
+      shell: |
+        kubectl get vmi -n {{ vm_namespace | default('default') }} -o json | \
+        jq -r '.items[] | select(.status.phase=="Running") | .metadata.name' | wc -l
+      register: running_vmis
+      until: running_vmis.stdout | int >= (num_vms | int)
+      retries: 30
+      delay: 10
+      ignore_errors: yes
+
+    - name: Get VM IP addresses
+      shell: |
+        kubectl get vmi {{ vm_base_name | default('vm') }}{{ item }} \
+        -n {{ vm_namespace | default('default') }} \
+        -o jsonpath='{.status.interfaces[0].ipAddress}' 2>/dev/null || echo ""
+      loop: "{{ range(1, num_vms | int + 1) | list }}"
+      register: vm_ips
+      ignore_errors: yes
+
+    - name: Create inventory directory if it doesn't exist
+      file:
+        path: "{{ playbook_dir }}/../inventory"
+        state: directory
+        mode: '0755'
+      delegate_to: localhost
+      become: no
+
+    - name: Generate Ansible inventory for VMs
+      template:
+        src: ../templates/kubevirt-inventory.ini.j2
+        dest: "{{ playbook_dir }}/../inventory/kubevirt-vms.ini"
+      delegate_to: localhost
+      become: no
+
+    - name: Display inventory location
+      debug:
+        msg: "Generated inventory file: {{ playbook_dir }}/../inventory/kubevirt-vms.ini"
+
+    - name: Save deployment summary
+      copy:
+        dest: "/tmp/kubevirt-vms/deployment-summary.txt"
+        content: |
+          KubeVirt VM Deployment Summary
+          ==============================
+          Date: {{ ansible_date_time.iso8601 }}
+          
+          Resource Configuration:
+          - CPU Overcommit: {{ cpu_overcommit }}x
+          - Memory Overcommit: {{ memory_overcommit }}x
+          - Total CPU: {{ total_cpu_cores }} cores
+          - Total Memory: {{ total_memory_gb }} GB
+          
+          Per-VM Allocation:
+          - CPU Limit: {{ vm_cpu_cores }} cores
+          - CPU Request: {{ vm_cpu_request_millicores }}m
+          - Memory Limit: {{ vm_memory_gb }}Gi
+          - Memory Request: {{ vm_memory_request_mb }}Mi
+          
+          Deployment:
+          - Number of VMs: {{ num_vms }}
+          - VM Names: {{ vm_base_name | default('vm') }}1 to {{ vm_base_name | default('vm') }}{{ num_vms }}
+          - Namespace: {{ vm_namespace | default('default') }}
+          - Storage: ContainerDisk (ephemeral)
+          - OS Image: {{ os_image | default('quay.io/containerdisks/ubuntu:24.04') }}
+          
+          Packages Installed:
+          - stress-ng (for stress testing)
+          
+          Ansible Inventory:
+          - {{ playbook_dir }}/../inventory/kubevirt-vms.ini
+          
+          Access:
+          - Console: virtctl console {{ vm_base_name | default('vm') }}<N>
+          - SSH: virtctl ssh ubuntu@{{ vm_base_name | default('vm') }}<N>
+          - Credentials: ubuntu:ubuntu or core:core

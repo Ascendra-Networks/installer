@@ -1,0 +1,72 @@
+---
+# KubeVirt VM Deployment Configuration
+# Copy this file to kubevirt-vms.yml and customize for your environment
+
+# Resource Overcommit Ratios
+# These determine how much you can oversubscribe CPU and memory
+cpu_overcommit: 8          # 8:1 CPU overcommit ratio
+memory_overcommit: 8       # 8:1 memory overcommit ratio
+
+# Total Available Resources for VMs
+# Set these to the total resources you want to allocate to VMs
+total_cpu_cores: 64        # Total CPU cores available for VM allocation
+total_memory_gb: 128       # Total memory in GB available for VM allocation
+
+# Per-VM Resource Allocation (Limits)
+# Each VM will be created with these resource limits
+vm_cpu_cores: 8            # CPU cores per VM (limit)
+vm_memory_gb: 8            # Memory in GB per VM (limit)
+
+# VM Naming Configuration
+vm_base_name: "vm"         # Base name for VMs (will be vm1, vm2, vm3, etc.)
+vm_namespace: "default"    # Kubernetes namespace for VMs
+
+# Optional: Maximum number of VMs to create
+# Leave undefined or set to 0 to use calculated maximum based on resources
+# Set to a specific number to limit VM creation (e.g., max_vms: 12)
+# max_vms: 12
+
+# OS Image Configuration
+# Container disk image to use for VMs (ephemeral storage)
+os_image: "quay.io/containerdisks/ubuntu:24.04"
+
+# SSH Key Configuration (optional)
+# Path to SSH public key for VM access
+# Leave empty to use default (~/.ssh/id_rsa.pub)
+ssh_key_file: ""
+
+# Ansible inventory auth for KubeVirt VMs (optional)
+# Prefer SSH key: set kubevirt_ansible_private_key_file in kubevirt-vms.yml or leave unset for ~/.ssh/id_rsa
+# Or use password auth (set in vault, do not commit): kubevirt_ansible_user, kubevirt_ansible_password, kubevirt_ansible_become_password
+# kubevirt_ansible_user: "ubuntu"
+# kubevirt_ansible_private_key_file: "{{ lookup('env', 'HOME') }}/.ssh/id_rsa"
+
+# Example Configurations:
+# ------------------------
+
+# High-Density Configuration (lots of small VMs):
+# cpu_overcommit: 16
+# memory_overcommit: 16
+# total_cpu_cores: 128
+# total_memory_gb: 256
+# vm_cpu_cores: 4
+# vm_memory_gb: 4
+# Result: ~512 VMs (128*16/4 = 512 by CPU, 256*16/4 = 1024 by memory)
+
+# Balanced Configuration (moderate overcommit):
+# cpu_overcommit: 4
+# memory_overcommit: 4
+# total_cpu_cores: 64
+# total_memory_gb: 128
+# vm_cpu_cores: 8
+# vm_memory_gb: 8
+# Result: ~32 VMs
+
+# Conservative Configuration (minimal overcommit):
+# cpu_overcommit: 2
+# memory_overcommit: 2
+# total_cpu_cores: 32
+# total_memory_gb: 64
+# vm_cpu_cores: 4
+# vm_memory_gb: 8
+# Result: ~16 VMs (32*2/4 = 16 by CPU, 64*2/8 = 16 by memory)

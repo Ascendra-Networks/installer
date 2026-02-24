@@ -1,0 +1,28 @@
+# Ansible Inventory for KubeVirt VMs
+# Generated on {{ ansible_date_time.iso8601 }}
+# Total VMs: {{ num_vms }}
+
+[kubevirt_vms]
+{% for item in vm_ips.results %}
+{% set vm_num = loop.index %}
+{% set vm_name = (vm_base_name | default('vm')) ~ vm_num %}
+{% if item.stdout != "" %}
+{{ vm_name }} ansible_host={{ item.stdout }} ansible_user={{ kubevirt_ansible_user | default('ubuntu') }}{% if kubevirt_ansible_password is defined and kubevirt_ansible_password | length > 0 %} ansible_password={{ kubevirt_ansible_password }} ansible_become=yes ansible_become_password={{ kubevirt_ansible_become_password | default(kubevirt_ansible_password) }}{% else %} ansible_ssh_private_key_file={{ kubevirt_ansible_private_key_file | default(lookup('env', 'HOME') + '/.ssh/id_rsa') }}{% endif %}
+{% else %}
+# {{ vm_name }} - IP not available yet
+{% endif %}
+{% endfor %}
+
+[kubevirt_vms:vars]
+ansible_ssh_common_args='-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
+ansible_python_interpreter=/usr/bin/python3
+
+# VM Specifications
+vm_cpu_cores={{ vm_cpu_cores }}
+vm_memory_gb={{ vm_memory_gb }}
+cpu_overcommit={{ cpu_overcommit }}
+memory_overcommit={{ memory_overcommit }}
+
+
+
+

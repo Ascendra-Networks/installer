@@ -1,0 +1,161 @@
+---
+# KubeVirt VM Eviction/Migration Playbook
+# Evict (migrate) specific VMs to test live migration
+
+- name: Evict KubeVirt VMs
+  hosts: localhost
+  gather_facts: no
+
+  vars:
+    vm_namespace: "default"
+    vm_names: []              # List of VM names to evict, e.g., ['vm5', 'vm8']
+    eviction_method: "migrate"  # migrate, drain, delete_pod
+
+  tasks:
+    - name: Validate VM names provided
+      assert:
+        that:
+          - vm_names | length > 0
+        fail_msg: "Please provide vm_names as a list, e.g., -e 'vm_names=[\"vm5\",\"vm8\"]'"
+
+    - name: Check if virtctl is available (for migrate method)
+      command: which virtctl
+      register: virtctl_check
+      failed_when: false
+      changed_when: false
+      when: eviction_method == "migrate"
+
+    - name: Display eviction plan
+      debug:
+        msg:
+          - "=== VM Eviction Plan ==="
+          - "Method: {{ eviction_method }}"
+          - "Namespace: {{ vm_namespace }}"
+          - "VMs to evict: {{ vm_names }}"
+
+    - name: Get current VM status
+      shell: kubectl get vmi {{ item }} -n {{ vm_namespace }} -o jsonpath='{.status.nodeName}'
+      loop: "{{ vm_names }}"
+      register: vm_nodes
+      ignore_errors: yes
+
+    - name: Display current VM locations
+      debug:
+        msg: "{{ item.item }} is running on node: {{ item.stdout | default('NOT FOUND') }}"
+      loop: "{{ vm_nodes.results }}"
+
+    - name: Method 1 - Migrate VMs using virtctl
+      block:
+        - name: Trigger VM migration
+          command: virtctl migrate {{ item }} -n {{ vm_namespace }}
+          loop: "{{ vm_names }}"
+          register: migrate_results
+
+        - name: Display migration status
+          debug:
+            msg: "Migration triggered for {{ item.item }}"
+          loop: "{{ migrate_results.results }}"
+
+        - name: Wait for migration to complete
+          shell: |
+            kubectl get vmi {{ item }} -n {{ vm_namespace }} -o jsonpath='{.status.migrationState.completed}'
+          loop: "{{ vm_names }}"
+          register: migration_status
+          until: migration_status.stdout == "true"
+          retries: 60
+          delay: 5
+          ignore_errors: yes
+
+        - name: Get new VM locations
+          shell: kubectl get vmi {{ item }} -n {{ vm_namespace }} -o jsonpath='{.status.nodeName}'
+          loop: "{{ vm_names }}"
+          register: new_vm_nodes
+
+        - name: Display new VM locations
+          debug:
+            msg: "{{ item.item }} is now running on node: {{ item.stdout }}"
+          loop: "{{ new_vm_nodes.results }}"
+
+      when: eviction_method == "migrate"
+
+    - name: Method 2 - Evict by deleting virt-launcher pod
+      block:
+        - name: Get virt-launcher pod names
+          shell: |
+            kubectl get pods -n {{ vm_namespace }} -l kubevirt.io/vm={{ item }} \
+            -o jsonpath='{.items[0].metadata.name}'
+          loop: "{{ vm_names }}"
+          register: launcher_pods
+
+        - name: Evict virt-launcher pods
+          command: kubectl delete pod {{ item.stdout }} -n {{ vm_namespace }}
+          loop: "{{ launcher_pods.results }}"
+          when: item.stdout != ""
+
+        - name: Wait for VMs to be running again
+          shell: kubectl get vmi {{ item }} -n {{ vm_namespace }} -o jsonpath='{.status.phase}'
+          loop: "{{ vm_names }}"
+          register: vm_status
+          until: vm_status.stdout == "Running"
+          retries: 60
+          delay: 5
+
+        - name: Get new VM locations
+          shell: kubectl get vmi {{ item }} -n {{ vm_namespace }} -o jsonpath='{.status.nodeName}'
+          loop: "{{ vm_names }}"
+          register: new_vm_nodes_pod
+
+        - name: Display new VM locations
+          debug:
+            msg: "{{ item.item }} migrated to node: {{ item.stdout }}"
+          loop: "{{ new_vm_nodes_pod.results }}"
+
+      when: eviction_method == "delete_pod"
+
+    - name: Method 3 - Drain node to trigger migration
+      block:
+        - name: Get nodes where VMs are running
+          set_fact:
+            nodes_to_drain: "{{ vm_nodes.results | map(attribute='stdout') | unique | list }}"
+
+        - name: Display nodes to drain
+          debug:
+            msg: "Will drain nodes: {{ nodes_to_drain }}"
+
+        - name: Drain nodes (cordoned and evict pods)
+          command: kubectl drain {{ item }} --ignore-daemonsets --delete-emptydir-data --pod-selector=kubevirt.io/vm
+          loop: "{{ nodes_to_drain }}"
+          register: drain_results
+          ignore_errors: yes
+
+        - name: Wait for VMs to migrate
+          pause:
+            seconds: 30
+
+        - name: Get new VM locations
+          shell: kubectl get vmi {{ item }} -n {{ vm_namespace }} -o jsonpath='{.status.nodeName}'
+          loop: "{{ vm_names }}"
+          register: new_vm_nodes_drain
+
+        - name: Display new VM locations
+          debug:
+            msg: "{{ item.item }} migrated to node: {{ item.stdout }}"
+          loop: "{{ new_vm_nodes_drain.results }}"
+
+        - name: Uncordon nodes
+          command: kubectl uncordon {{ item }}
+          loop: "{{ nodes_to_drain }}"
+
+      when: eviction_method == "drain"
+
+    - name: Final summary
+      debug:
+        msg:
+          - "=== Eviction Complete ==="
+          - "Method used: {{ eviction_method }}"
+          - "VMs evicted: {{ vm_names | join(', ') }}"
+          - "Check VM status: kubectl get vmis -n {{ vm_namespace }}"
+
+
+
+

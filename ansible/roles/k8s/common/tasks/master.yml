@@ -1,0 +1,405 @@
+---
+# Kubernetes Master: uses helpers (containerd_wait, kubelet_swap), then master-only (kubeadm init, kubeconfig, join command).
+
+# Check if Already Initialized
+- name: Check if Kubernetes cluster is already initialized
+  stat:
+    path: /etc/kubernetes/admin.conf
+  register: kubeadm_already_initialized
+
+- name: Check for leftover kubernetes config (partial previous run)
+  stat:
+    path: /etc/kubernetes
+  register: kubeadm_config_exists
+  when: not kubeadm_already_initialized.stat.exists
+
+- name: Reset kubeadm and remove leftover state (partial init or failed run)
+  block:
+    - name: Run kubeadm reset to clear partial state
+      command: kubeadm reset -f
+      changed_when: true
+      failed_when: false
+
+    - name: Remove leftover /etc/kubernetes and /var/lib/etcd
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/kubernetes
+        - /var/lib/etcd
+      failed_when: false
+  when:
+    - not kubeadm_already_initialized.stat.exists
+    - kubeadm_config_exists is defined
+    - kubeadm_config_exists.stat.exists | default(false) | bool
+
+- name: Skip initialization if already done
+  debug:
+    msg: "Kubernetes cluster is already initialized, skipping initialization steps"
+  when: kubeadm_already_initialized.stat.exists
+
+# ============================================
+# API server health check for already-initialized clusters
+# kubelet may have been restarted (e.g. daemon-reexec / node reboot) and
+# the static pods need time to come back up before we attempt any kubectl call.
+# ============================================
+- name: Check if API server port is open (cluster already initialized)
+  wait_for:
+    host: "{{ ansible_default_ipv4.address }}"
+    port: 6443
+    timeout: 30
+    state: started
+  register: apiserver_initial_check
+  ignore_errors: yes
+  when: kubeadm_already_initialized.stat.exists
+
+- name: Restart kubelet to recover static pods if API server is not responding
+  systemd:
+    name: kubelet
+    state: restarted
+    daemon_reload: yes
+  when:
+    - kubeadm_already_initialized.stat.exists
+    - apiserver_initial_check is failed
+  failed_when: false
+
+- name: Wait for API server to come up after kubelet restart
+  wait_for:
+    host: "{{ ansible_default_ipv4.address }}"
+    port: 6443
+    timeout: 120
+    state: started
+  when:
+    - kubeadm_already_initialized.stat.exists
+    - apiserver_initial_check is failed
+
+# ============================================
+# Upgrade path (when cluster already exists and kubernetes_version is newer)
+# ============================================
+- name: Get current cluster version (for upgrade)
+  command: kubectl get nodes -o jsonpath='{.items[0].status.nodeInfo.kubeletVersion}'
+  environment:
+    KUBECONFIG: "{{ admin_kubeconfig }}"
+  register: current_k8s_version
+  changed_when: false
+  failed_when: false
+  when: kubeadm_already_initialized.stat.exists
+
+- name: Set target upgrade version (vX.Y.Z for kubeadm)
+  set_fact:
+    k8s_upgrade_target: "v{{ kubernetes_version | default('1.31') }}"
+  when:
+    - kubeadm_already_initialized.stat.exists
+    - current_k8s_version.rc == 0
+
+- name: Check if cluster upgrade is needed
+  set_fact:
+    k8s_upgrade_needed: "{{ (current_k8s_version.stdout | default('') | regex_replace('^v', '')) != (kubernetes_version | default('1.31')) }}"
+  when:
+    - kubeadm_already_initialized.stat.exists
+    - current_k8s_version.rc == 0
+
+# Kubernetes supports upgrading one minor version at a time; kubeadm also enforces minimum cluster version.
+- name: Set current and target minor version (for skew check)
+  set_fact:
+    current_k8s_minor: "{{ (current_k8s_version.stdout | default('v0.0.0') | regex_replace('^v', '') | split('.'))[1] | int }}"
+    target_k8s_minor: "{{ (kubernetes_version | default('1.31') | split('.'))[1] | int }}"
+    current_k8s_major: "{{ (current_k8s_version.stdout | default('v0.0.0') | regex_replace('^v', '') | split('.'))[0] | int }}"
+  when:
+    - kubeadm_already_initialized.stat.exists
+    - current_k8s_version.rc == 0
+    - k8s_upgrade_needed | default(false) | bool
+
+- name: Fail if upgrade skips more than one minor version
+  fail:
+    msg: |
+      Kubernetes upgrade is limited to one minor version at a time.
+      Current cluster: {{ current_k8s_version.stdout }}
+      Requested: {{ kubernetes_version | default('1.31') }}
+
+      Set kubernetes_version to the next minor (e.g. {{ current_k8s_major }}.{{ (current_k8s_minor | int) + 1 }}) in inventory/group_vars/all.yml,
+      re-run this playbook, then repeat for each minor until you reach {{ kubernetes_version | default('1.31') }}.
+
+      Example: 1.31 → 1.32 → 1.33 → 1.34 → 1.35
+  when:
+    - kubeadm_already_initialized.stat.exists
+    - k8s_upgrade_needed | default(false) | bool
+    - (target_k8s_minor | int) > ((current_k8s_minor | int) + 1)
+
+- name: Run kubeadm upgrade plan (show available upgrade)
+  command: kubeadm upgrade plan
+  environment:
+    KUBECONFIG: "{{ admin_kubeconfig }}"
+  register: kubeadm_upgrade_plan
+  changed_when: false
+  when:
+    - kubeadm_already_initialized.stat.exists
+    - k8s_upgrade_needed | default(false) | bool
+    - (target_k8s_minor | default(0) | int) <= ((current_k8s_minor | default(0) | int) + 1)
+
+- name: Display kubeadm upgrade plan
+  debug:
+    var: kubeadm_upgrade_plan.stdout_lines
+  when:
+    - kubeadm_already_initialized.stat.exists
+    - k8s_upgrade_needed | default(false) | bool
+    - kubeadm_upgrade_plan.rc == 0
+
+- name: Apply kubeadm upgrade (control-plane)
+  command: >
+    kubeadm upgrade apply {{ k8s_upgrade_target }}
+    --allow-experimental-upgrades
+    --allow-release-candidate-upgrades
+    -y
+  environment:
+    KUBECONFIG: "{{ admin_kubeconfig }}"
+  register: kubeadm_upgrade_apply
+  when:
+    - kubeadm_already_initialized.stat.exists
+    - k8s_upgrade_needed | default(false) | bool
+
+- name: Restart kubelet after control-plane upgrade
+  systemd:
+    name: kubelet
+    state: restarted
+    daemon_reload: yes
+  when:
+    - kubeadm_already_initialized.stat.exists
+    - k8s_upgrade_needed | default(false) | bool
+    - kubeadm_upgrade_apply is changed
+
+# Firewall
+- name: Open firewall port for API server (Ubuntu/ufw)
+  ufw:
+    rule: allow
+    port: '6443'
+  failed_when: false
+  when:
+    - not kubeadm_already_initialized.stat.exists
+    - ansible_os_family == "Debian"
+
+- name: Open firewall port for API server (SUSE/firewalld)
+  shell: firewall-cmd --permanent --add-port=6443/tcp && firewall-cmd --reload
+  failed_when: false
+  when:
+    - not kubeadm_already_initialized.stat.exists
+    - ansible_os_family == "Suse"
+
+# Use helper: ensure containerd is ready before kubeadm init
+- name: Ensure containerd is running and socket is accessible
+  include_tasks: ../../helpers/tasks/containerd_wait.yml
+  when: not kubeadm_already_initialized.stat.exists
+
+# ============================================
+# Proxy patches for static pods (kubeadm strategic-merge patches)
+# Written before kubeadm init so --patches picks them up.
+# ============================================
+- name: Create kubeadm patches directory
+  file:
+    path: /etc/kubeadm/patches
+    state: directory
+    mode: '0755'
+  when:
+    - proxy_enabled | default(false) | bool
+    - not kubeadm_already_initialized.stat.exists
+
+- name: Write proxy env patch for static pod components
+  copy:
+    dest: "/etc/kubeadm/patches/{{ item }}+strategic.yaml"
+    content: |
+      apiVersion: v1
+      kind: Pod
+      spec:
+        containers:
+        - name: {{ item }}
+          env:
+          - name: HTTP_PROXY
+            value: "{{ HTTP_PROXY }}"
+          - name: http_proxy
+            value: "{{ http_proxy }}"
+          - name: HTTPS_PROXY
+            value: "{{ HTTPS_PROXY }}"
+          - name: https_proxy
+            value: "{{ https_proxy }}"
+          - name: NO_PROXY
+            value: "{{ NO_PROXY }}"
+          - name: no_proxy
+            value: "{{ no_proxy }}"
+    mode: '0644'
+  loop:
+    - kube-apiserver
+    - kube-controller-manager
+    - kube-scheduler
+    - etcd
+  when:
+    - proxy_enabled | default(false) | bool
+    - not kubeadm_already_initialized.stat.exists
+
+# kubeadm init
+- name: Pull required images for kubeadm
+  command: kubeadm config images pull
+  retries: 3
+  delay: 10
+  when: not kubeadm_already_initialized.stat.exists
+
+- name: Ensure systemd and kubelet are ready before kubeadm init
+  shell: |
+    systemctl daemon-reload
+    systemctl enable kubelet.service || true
+    systemctl reset-failed kubelet.service || true
+  failed_when: false
+  when:
+    - not kubeadm_already_initialized.stat.exists
+    - ansible_service_mgr == 'systemd'
+
+- name: Initialize Kubernetes cluster with kubeadm
+  shell: |
+    kubeadm init \
+      --pod-network-cidr={{ pod_network_cidr | default('10.10.0.0/16') }} \
+      --ignore-preflight-errors=Swap \
+      {{ '--skip-phases=addon/kube-proxy' if (skip_kube_proxy | default(false) | bool) else '' }} \
+      {{ '--patches /etc/kubeadm/patches' if (proxy_enabled | default(false) | bool) else '' }} &
+    KUBEADM_PID=$!
+
+    # kubeadm may fail to start kubelet internally; watch for the config
+    # file and manually bring it up if needed
+    for i in $(seq 1 90); do
+      if [ -f /var/lib/kubelet/config.yaml ]; then
+        sleep 2
+        systemctl daemon-reload 2>/dev/null || true
+        systemctl restart kubelet 2>/dev/null || true
+        break
+      fi
+      sleep 2
+    done
+
+    wait $KUBEADM_PID
+  args:
+    creates: /etc/kubernetes/admin.conf
+  register: kubeadm_init_output
+  when: not kubeadm_already_initialized.stat.exists
+
+- name: Display kubeadm init output
+  debug:
+    var: kubeadm_init_output.stdout_lines
+  when:
+    - not kubeadm_already_initialized.stat.exists
+    - kubeadm_init_output.changed
+
+# Kubeconfig
+- name: Get primary group of {{ ansible_user }}
+  command: id -gn {{ ansible_user }}
+  register: ansible_user_group
+  changed_when: false
+
+- name: Create .kube directory for {{ ansible_user }}
+  file:
+    path: "{{ kubeconfig_dir }}"
+    state: directory
+    mode: '0755'
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user_group.stdout }}"
+
+- name: Copy admin.conf to user's kube config
+  copy:
+    src: "{{ admin_kubeconfig }}"
+    dest: "{{ kubeconfig_dir }}/config"
+    remote_src: yes
+    mode: '0600'
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user_group.stdout }}"
+
+- name: Create .kube directory for root
+  file:
+    path: /root/.kube
+    state: directory
+    mode: '0755'
+
+- name: Copy admin.conf to root's kube config
+  copy:
+    src: "{{ admin_kubeconfig }}"
+    dest: /root/.kube/config
+    remote_src: yes
+    mode: '0600'
+
+# Use helper: kubelet swap (same for master and worker)
+- name: Configure kubelet for swap support
+  include_tasks: ../../helpers/tasks/kubelet_swap.yml
+
+# Wait for cluster, join command, cluster info
+- name: Wait for control plane to be ready
+  command: kubectl get nodes
+  environment:
+    KUBECONFIG: "{{ admin_kubeconfig }}"
+  register: kubectl_get_nodes
+  until: kubectl_get_nodes.rc == 0
+  retries: 10
+  delay: 6
+  changed_when: false
+
+- name: Generate join command for worker nodes
+  command: kubeadm token create --print-join-command --ttl {{ token_ttl }}
+  register: join_command_output
+  changed_when: false
+
+- name: Save join command to local file
+  copy:
+    content: "{{ join_command_output.stdout }} --ignore-preflight-errors=Swap"
+    dest: /tmp/kubeadm_join_command.sh
+    mode: '0755'
+  delegate_to: localhost
+  become: no
+
+- name: Display join command
+  debug:
+    msg:
+      - "============================================"
+      - "Master node initialized successfully!"
+      - "============================================"
+      - ""
+      - "Join command saved to: /tmp/kubeadm_join_command.sh"
+      - ""
+      - "Worker nodes can join using:"
+      - "{{ join_command_output.stdout }} --ignore-preflight-errors=Swap"
+      - ""
+      - "============================================"
+
+- name: Display cluster info
+  command: kubectl cluster-info
+  environment:
+    KUBECONFIG: "{{ admin_kubeconfig }}"
+  register: cluster_info
+  changed_when: false
+
+- name: Show cluster info
+  debug:
+    var: cluster_info.stdout_lines
+
+- name: Get current nodes
+  command: kubectl get nodes -o wide
+  environment:
+    KUBECONFIG: "{{ admin_kubeconfig }}"
+  register: get_nodes
+  changed_when: false
+
+- name: Show current nodes
+  debug:
+    var: get_nodes.stdout_lines
+
+- name: Note about CNI installation
+  debug:
+    msg:
+      - "============================================"
+      - "IMPORTANT: CNI Plugin Not Installed"
+      - "============================================"
+      - ""
+      - "Nodes will show 'NotReady' until you install a CNI plugin."
+      - "Install your preferred CNI plugin manually."
+      - ""
+      - "Example (Calico):"
+      - "  kubectl create -f https://raw.githubusercontent.com/projectcalico/calico/v3.28.0/manifests/tigera-operator.yaml"
+      - "  curl https://raw.githubusercontent.com/projectcalico/calico/v3.28.0/manifests/custom-resources.yaml -O"
+      - "  sed -i 's/cidr: 192\\.168\\.0\\.0\\/16/cidr: 10.10.0.0\\/16/g' custom-resources.yaml"
+      - "  kubectl create -f custom-resources.yaml"
+      - ""
+      - "============================================"

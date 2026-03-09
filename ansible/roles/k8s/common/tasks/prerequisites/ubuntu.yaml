@@ -2,6 +2,65 @@
 # Ubuntu/Debian Prerequisites - Package Installation and K8s Repo Setup
 
 # ============================================
+# Proxy Configuration (systemd drop-in)
+# Must run before containerd/kubelet so all spawned services inherit proxy vars.
+# ============================================
+
+- name: Create systemd system.conf.d directory
+  file:
+    path: /etc/systemd/system.conf.d
+    state: directory
+    mode: '0755'
+  when: proxy_enabled | default(false) | bool
+
+- name: Write systemd proxy drop-in (zzzz-proxy.conf)
+  copy:
+    dest: /etc/systemd/system.conf.d/zzzz-proxy.conf
+    content: |
+      [Manager]
+      DefaultEnvironment="HTTP_PROXY={{ HTTP_PROXY }}"
+      DefaultEnvironment="http_proxy={{ http_proxy }}"
+      DefaultEnvironment="HTTPS_PROXY={{ HTTPS_PROXY }}"
+      DefaultEnvironment="https_proxy={{ https_proxy }}"
+      DefaultEnvironment="NO_PROXY={{ NO_PROXY }}"
+      DefaultEnvironment="no_proxy={{ no_proxy }}"
+    mode: '0644'
+  when: proxy_enabled | default(false) | bool
+
+- name: Remove systemd proxy drop-in when proxy is disabled
+  file:
+    path: /etc/systemd/system.conf.d/zzzz-proxy.conf
+    state: absent
+  when: not (proxy_enabled | default(false) | bool)
+
+- name: Write proxy vars to /etc/environment (interactive shells and non-systemd tools)
+  blockinfile:
+    path: /etc/environment
+    marker: "# {mark} ASCENDRA PROXY"
+    block: |
+      HTTP_PROXY="{{ HTTP_PROXY }}"
+      http_proxy="{{ http_proxy }}"
+      HTTPS_PROXY="{{ HTTPS_PROXY }}"
+      https_proxy="{{ https_proxy }}"
+      NO_PROXY="{{ NO_PROXY }}"
+      no_proxy="{{ no_proxy }}"
+    create: yes
+    mode: '0644'
+  when: proxy_enabled | default(false) | bool
+
+- name: Remove proxy vars from /etc/environment when proxy is disabled
+  blockinfile:
+    path: /etc/environment
+    marker: "# {mark} ASCENDRA PROXY"
+    block: ""
+  when: not (proxy_enabled | default(false) | bool)
+  failed_when: false
+
+- name: Reload systemd manager to apply proxy environment
+  command: systemctl daemon-reexec
+  when: proxy_enabled | default(false) | bool
+
+# ============================================
 # Update System and Install Base Packages
 # ============================================
 
@@ -31,10 +90,9 @@
 # Install and Configure Containerd
 # ============================================
 
-- name: Install Docker and containerd packages
+- name: Install containerd and supporting packages
   apt:
     name:
-      - docker.io
       - containerd
       - openvswitch-switch
       - python3
@@ -42,17 +100,9 @@
     state: present
     update_cache: no
 
-- name: Enable and start Docker service (systemd)
-  systemd:
-    name: docker
-    enabled: yes
-    state: started
-  failed_when: false
-  when: ansible_service_mgr == 'systemd'
-
 - name: Create containerd configuration directory
   file:
-    path: "{{ containerd_config_dir }}"
+    path: "{{ containerd_config_dir | default('/etc/containerd') }}"
     state: directory
     mode: '0755'
 
@@ -63,19 +113,19 @@
   failed_when: false
 
 - name: Check if containerd config has actual content
-  shell: grep -c '^\[' {{ containerd_config_file }} 2>/dev/null || echo "0"
+  shell: grep -c '^\[' {{ containerd_config_file | default('/etc/containerd/config.toml') }} 2>/dev/null || echo "0"
   register: containerd_config_sections
   changed_when: false
   failed_when: false
 
 - name: Generate default containerd configuration
-  shell: "{{ containerd_bin.stdout | trim }} config default > {{ containerd_config_file }}"
+  shell: "{{ containerd_bin.stdout | trim }} config default > {{ containerd_config_file | default('/etc/containerd/config.toml') }}"
   when: containerd_bin.stdout | length > 0 and (containerd_config_sections.stdout | trim | int) == 0
   failed_when: false
 
 - name: Configure containerd to use systemd cgroup driver
   replace:
-    path: "{{ containerd_config_file }}"
+    path: "{{ containerd_config_file | default('/etc/containerd/config.toml') }}"
     regexp: 'SystemdCgroup = false'
     replace: 'SystemdCgroup = true'
   when: ansible_service_mgr == 'systemd'
@@ -88,8 +138,8 @@
 
 - name: Configure containerd native snapshotter for container environments
   shell: |
-    if [ -f {{ containerd_config_file }} ]; then
-      sed -i 's/snapshotter = "overlayfs"/snapshotter = "native"/' {{ containerd_config_file }}
+    if [ -f {{ containerd_config_file | default('/etc/containerd/config.toml') }} ]; then
+      sed -i 's/snapshotter = "overlayfs"/snapshotter = "native"/' {{ containerd_config_file | default('/etc/containerd/config.toml') }}
     fi
   when: dockerenv_check.stat.exists or ansible_service_mgr != 'systemd'
   failed_when: false
@@ -178,6 +228,11 @@
     state: directory
     mode: '0755'
 
+# pkgs.k8s.io repo path uses major.minor only (e.g. v1.35), not full version (v1.35.1)
+- name: Set Kubernetes repo version (major.minor for repo URL)
+  set_fact:
+    kubernetes_version_repo: "{{ (kubernetes_version | default('1.31')) | regex_replace('^(\\d+\\.\\d+).*', '\\1') }}"
+
 - name: Check if Kubernetes GPG key already exists
   stat:
     path: /etc/apt/keyrings/kubernetes-apt-keyring.gpg
@@ -194,17 +249,18 @@
 
 - name: Download and install Kubernetes GPG key
   shell: |
-    curl -fsSL https://pkgs.k8s.io/core:/stable:/v{{ kubernetes_version }}/deb/Release.key | gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+    curl -fsSL https://pkgs.k8s.io/core:/stable:/v{{ kubernetes_version_repo }}/deb/Release.key | gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
     chmod 644 /etc/apt/keyrings/kubernetes-apt-keyring.gpg
   when: not k8s_gpg_key.stat.exists
   retries: 3
   delay: 10
 
 - name: Add Kubernetes apt repository
-  shell: |
-    echo "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v{{ kubernetes_version }}/deb/ /" | tee /etc/apt/sources.list.d/kubernetes.list
-  args:
-    creates: /etc/apt/sources.list.d/kubernetes.list
+  copy:
+    dest: /etc/apt/sources.list.d/kubernetes.list
+    content: |
+      deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v{{ kubernetes_version_repo }}/deb/ /
+    mode: '0644'
 
 - name: Update apt cache after adding Kubernetes repository
   apt:
@@ -212,12 +268,24 @@
   retries: 3
   delay: 10
 
-- name: Install Kubernetes tools (kubelet, kubeadm, kubectl)
+- name: Unhold Kubernetes packages (so upgrade can install new version)
+  command: apt-mark unhold kubelet kubeadm kubectl
+  changed_when: false
+  failed_when: false
+
+# When only X.Y is given (e.g. "1.31"), the repo URL already pins the minor version,
+# so no apt version constraint is needed.  When a full X.Y.Z patch version is given
+# (e.g. "1.31.5"), append "-*" to pin to that exact patch release.
+- name: Set Kubernetes apt package version pin
+  set_fact:
+    k8s_pkg_pin: "{{ '=' + kubernetes_version + '-*' if (kubernetes_version | default('')) | regex_search('^\\d+\\.\\d+\\.\\d+') else '' }}"
+
+- name: Install Kubernetes tools (kubelet, kubeadm, kubectl) at target version
   apt:
     name:
-      - kubelet
-      - kubeadm
-      - kubectl
+      - "kubelet{{ k8s_pkg_pin }}"
+      - "kubeadm{{ k8s_pkg_pin }}"
+      - "kubectl{{ k8s_pkg_pin }}"
     state: present
     update_cache: no
   register: k8s_tools_installed

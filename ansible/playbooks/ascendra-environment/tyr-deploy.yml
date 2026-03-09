@@ -1,0 +1,916 @@
+---
+# Playbook for deploying Tyr on Kubernetes cluster
+# This playbook installs Helm, creates necessary secrets, and deploys Tyr
+
+################################################################################
+# Phase 0: (removed — Helm is installed in Phase 1; Kyverno is installed last,
+#           after CNI is ready, in the final phase of this playbook)
+################################################################################
+
+################################################################################
+# Phase 1: Install Helm on Master Node
+################################################################################
+- name: Phase 1 - Install Helm
+  hosts: masters[0]
+  become: yes
+  gather_facts: yes
+
+  tasks:
+    - name: Check if Helm is already installed
+      command: helm version --short
+      register: helm_check
+      changed_when: false
+      failed_when: false
+    
+    - name: Download Helm installation script
+      get_url:
+        url: https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+        dest: /tmp/get_helm.sh
+        mode: '0700'
+      when: helm_check.rc != 0
+    
+    - name: Install Helm
+      command: /tmp/get_helm.sh
+      args:
+        creates: /usr/local/bin/helm
+      when: helm_check.rc != 0
+    
+    - name: Verify Helm installation
+      command: helm version --short
+      register: helm_version
+      changed_when: false
+    
+    - name: Display Helm version
+      debug:
+        msg: "✓ Helm installed: {{ helm_version.stdout }}"
+    
+    - name: Remove Helm installation script
+      file:
+        path: /tmp/get_helm.sh
+        state: absent
+      when: helm_check.rc != 0
+  
+  tags:
+    - helm
+    - phase1
+
+################################################################################
+# Phase 2: Login to GHCR and Create Namespace
+################################################################################
+- name: Phase 2 - Configure Kubernetes for Tyr
+  hosts: masters[0]
+  become: yes
+  gather_facts: no
+
+  tasks:
+    - name: Verify required variables are defined
+      assert:
+        that:
+          - ghcr_username is defined
+          - ghcr_password is defined
+        fail_msg: "Required variables not defined. Please set ghcr_username and ghcr_password"
+        success_msg: "✓ All required variables are defined"
+    
+    - name: Check Helm version
+      command: helm version --short
+      register: helm_version_check
+      changed_when: false
+      failed_when: false
+    
+    - name: Display Helm version
+      debug:
+        msg: "Helm version: {{ helm_version_check.stdout }}"
+    
+    - name: Login to GHCR with Helm (direct method)
+      shell: |
+        echo '{{ ghcr_password }}' | helm registry login ghcr.io --username {{ ghcr_username }} --password-stdin
+      register: helm_login
+      changed_when: "'Login Succeeded' in helm_login.stdout"
+      failed_when: false
+      no_log: true
+    
+
+    - name: Display Helm login status
+      debug:
+        msg: "✓ Successfully logged in to ghcr.io with Helm"
+      when: helm_login.rc == 0
+    
+    - name: Display Docker fallback login status
+      debug:
+        msg:
+          - "⚠️  Helm registry login failed, but Docker login succeeded"
+          - "Helm will use Docker's credentials automatically"
+          - "Proceeding with deployment..."
+      when: helm_login.rc != 0 and docker_login is defined and docker_login.rc == 0
+    
+    - name: Fail if both login methods unsuccessful
+      fail:
+        msg: |
+          Registry login failed. Cannot proceed with Tyr deployment.
+          
+          Troubleshooting:
+          1. Verify token has 'read:packages' scope: https://github.com/settings/tokens
+          2. Test manually on master node (works in your case):
+             ssh ubuntu@{{ inventory_hostname }}
+             echo 'YOUR_TOKEN' | helm registry login ghcr.io --username {{ ghcr_username }} --password-stdin
+          3. Check if there are special characters in the token causing shell issues
+          
+          Helm login error: {{ helm_login.stderr | default('Unknown') }}
+          Docker login error: {{ docker_login.stderr | default('Not attempted') if docker_login is defined else 'Not attempted' }}
+      when: helm_login.rc != 0 and (docker_login is not defined or docker_login.rc != 0)
+    
+    - name: Check if tyr-system namespace exists
+      command: kubectl get namespace tyr-system
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      register: namespace_check
+      changed_when: false
+      failed_when: false
+    
+    - name: Create tyr-system namespace
+      command: kubectl create namespace tyr-system
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      when: namespace_check.rc != 0
+      register: namespace_created
+    
+    - name: Display namespace status
+      debug:
+        msg: "✓ Namespace tyr-system {{ 'created' if namespace_created.changed else 'already exists' }}"
+  
+  tags:
+    - configure
+    - namespace
+    - phase2
+
+################################################################################
+# Phase 3: Ensure GHCR pull secret in all configured namespaces
+################################################################################
+- name: Phase 3 - Ensure GHCR Secret in All Namespaces
+  hosts: masters[0]
+  become: yes
+  gather_facts: no
+
+  tasks:
+    - name: Ensure GHCR secret in ghcr_secret_namespaces
+      import_tasks: ../../roles/k8s/helpers/tasks/ghcr_secret_namespaces.yml
+
+    - name: Ensure tyr-system namespace exists
+      shell: kubectl create namespace tyr-system --dry-run=client -o yaml | kubectl apply -f -
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      changed_when: false
+
+    - name: Create tyr-github token secret
+      shell: |
+        kubectl create secret generic tyr-github \
+          -n tyr-system \
+          --from-literal=token={{ ghcr_password }} \
+          --dry-run=client -o yaml | kubectl apply -f -
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      no_log: true
+
+  tags:
+    - secret
+    - phase3
+
+################################################################################
+# Phase 4: Deploy Tyr using Helm
+################################################################################
+- name: Phase 4 - Deploy Tyr
+  hosts: masters[0]
+  become: yes
+  gather_facts: no
+
+  tasks:
+    - name: Check if Tyr is already installed
+      command: helm list -n tyr-system -o json
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      register: helm_list
+      changed_when: false
+      failed_when: false
+    
+    - name: Parse Helm list output
+      set_fact:
+        tyr_installed: "{{ (helm_list.stdout | from_json | selectattr('name', 'equalto', 'tyr') | list | length) > 0 }}"
+      when: helm_list.rc == 0
+    
+    - name: Set tyr_installed to false if helm list failed
+      set_fact:
+        tyr_installed: false
+      when: helm_list.rc != 0
+    
+    - name: Install Tyr using Helm
+      command: >
+        helm install tyr oci://ghcr.io/ascendra-networks/charts/tyr
+        --version {{ tyr_version | default('1.0.7') }}
+        --namespace tyr-system
+        --create-namespace
+        --set imagePullSecrets[0].name={{ ghcr_secret_name | default('ghcr-secret') }}
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      when: not tyr_installed
+      no_log: true
+      register: tyr_install
+    
+    - name: Upgrade Tyr using Helm (if already installed)
+      command: >
+        helm upgrade tyr oci://ghcr.io/ascendra-networks/charts/tyr
+        --version {{ tyr_version | default('1.0.7') }}
+        --namespace tyr-system
+        --set imagePullSecrets[0].name={{ ghcr_secret_name | default('ghcr-secret') }}
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      when: tyr_installed
+      no_log: true
+      register: tyr_upgrade
+    
+    - name: Display Tyr deployment status
+      debug:
+        msg: "✓ Tyr {{ 'installed' if tyr_install.changed else 'upgraded' }} successfully (version: {{ tyr_version | default('1.0.7') }})"
+    
+    - name: Wait for Tyr pods to be ready
+      command: >
+        kubectl wait --for=condition=Ready pods
+        --all -n tyr-system
+        --timeout=300s
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      register: pods_ready
+      changed_when: false
+      failed_when: false
+    
+    - name: Display pod status if wait timed out
+      command: kubectl get pods -n tyr-system
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      register: pod_status
+      when: pods_ready.rc != 0
+      changed_when: false
+    
+    - name: Show pod status
+      debug:
+        msg: "{{ pod_status.stdout_lines }}"
+      when: pods_ready.rc != 0
+  
+  tags:
+    - deploy
+    - phase4
+
+################################################################################
+# Phase 4.5: Inject proxy env vars directly into Tyr workloads (no Kyverno needed)
+# Kyverno is not available yet (CNI not installed), so we patch each Deployment
+# and DaemonSet explicitly with kubectl set env.
+# Once Kyverno is installed (final phase), it will handle future workloads
+# automatically. Existing workloads keep the vars set here.
+################################################################################
+- name: Phase 4.5 - Inject Proxy Env Vars into Tyr Workloads
+  hosts: masters[0]
+  become: yes
+  gather_facts: no
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+
+  tasks:
+    - name: Skip phase if proxy is not enabled
+      meta: end_play
+      when: not (proxy_enabled | default(false) | bool)
+    - name: Get all Deployments in tyr-system
+      command: >
+        kubectl get deployments -n tyr-system
+        -o jsonpath='{.items[*].metadata.name}'
+      register: tyr_deployments
+      changed_when: false
+      failed_when: false
+
+    - name: Inject proxy env vars into Tyr Deployments
+      command: >
+        kubectl set env deployment/{{ item }}
+        HTTP_PROXY={{ HTTP_PROXY | quote }}
+        http_proxy={{ http_proxy | quote }}
+        HTTPS_PROXY={{ HTTPS_PROXY | quote }}
+        https_proxy={{ https_proxy | quote }}
+        NO_PROXY={{ NO_PROXY | quote }}
+        no_proxy={{ no_proxy | quote }}
+        -n tyr-system
+      loop: "{{ tyr_deployments.stdout.split() }}"
+      when: tyr_deployments.stdout | length > 0
+      register: deploy_env_result
+      changed_when: deploy_env_result.rc == 0
+
+    - name: Get all DaemonSets in tyr-system
+      command: >
+        kubectl get daemonsets -n tyr-system
+        -o jsonpath='{.items[*].metadata.name}'
+      register: tyr_daemonsets
+      changed_when: false
+      failed_when: false
+
+    - name: Inject proxy env vars into Tyr DaemonSets
+      command: >
+        kubectl set env daemonset/{{ item }}
+        HTTP_PROXY={{ HTTP_PROXY | quote }}
+        http_proxy={{ http_proxy | quote }}
+        HTTPS_PROXY={{ HTTPS_PROXY | quote }}
+        https_proxy={{ https_proxy | quote }}
+        NO_PROXY={{ NO_PROXY | quote }}
+        no_proxy={{ no_proxy | quote }}
+        -n tyr-system
+      loop: "{{ tyr_daemonsets.stdout.split() }}"
+      when: tyr_daemonsets.stdout | length > 0
+      register: ds_env_result
+      changed_when: ds_env_result.rc == 0
+
+    - name: Get all StatefulSets in tyr-system
+      command: >
+        kubectl get statefulsets -n tyr-system
+        -o jsonpath='{.items[*].metadata.name}'
+      register: tyr_statefulsets
+      changed_when: false
+      failed_when: false
+
+    - name: Inject proxy env vars into Tyr StatefulSets
+      command: >
+        kubectl set env statefulset/{{ item }}
+        HTTP_PROXY={{ HTTP_PROXY | quote }}
+        http_proxy={{ http_proxy | quote }}
+        HTTPS_PROXY={{ HTTPS_PROXY | quote }}
+        https_proxy={{ https_proxy | quote }}
+        NO_PROXY={{ NO_PROXY | quote }}
+        no_proxy={{ no_proxy | quote }}
+        -n tyr-system
+      loop: "{{ tyr_statefulsets.stdout.split() }}"
+      when: tyr_statefulsets.stdout | length > 0
+      register: sts_env_result
+      changed_when: sts_env_result.rc == 0
+
+    - name: Get all Deployments in monitoring namespace
+      command: >
+        kubectl get deployments -n monitoring
+        -o jsonpath='{.items[*].metadata.name}'
+      register: monitoring_deployments
+      changed_when: false
+      failed_when: false
+
+    - name: Inject proxy env vars into monitoring Deployments
+      command: >
+        kubectl set env deployment/{{ item }}
+        HTTP_PROXY={{ HTTP_PROXY | quote }}
+        http_proxy={{ http_proxy | quote }}
+        HTTPS_PROXY={{ HTTPS_PROXY | quote }}
+        https_proxy={{ https_proxy | quote }}
+        NO_PROXY={{ NO_PROXY | quote }}
+        no_proxy={{ no_proxy | quote }}
+        -n monitoring
+      loop: "{{ monitoring_deployments.stdout.split() }}"
+      when: monitoring_deployments.stdout | length > 0
+      failed_when: false
+      changed_when: false
+
+    - name: Get all DaemonSets in monitoring namespace
+      command: >
+        kubectl get daemonsets -n monitoring
+        -o jsonpath='{.items[*].metadata.name}'
+      register: monitoring_daemonsets
+      changed_when: false
+      failed_when: false
+
+    - name: Inject proxy env vars into monitoring DaemonSets
+      command: >
+        kubectl set env daemonset/{{ item }}
+        HTTP_PROXY={{ HTTP_PROXY | quote }}
+        http_proxy={{ http_proxy | quote }}
+        HTTPS_PROXY={{ HTTPS_PROXY | quote }}
+        https_proxy={{ https_proxy | quote }}
+        NO_PROXY={{ NO_PROXY | quote }}
+        no_proxy={{ no_proxy | quote }}
+        -n monitoring
+      loop: "{{ monitoring_daemonsets.stdout.split() }}"
+      when: monitoring_daemonsets.stdout | length > 0
+      failed_when: false
+      changed_when: false
+
+    - name: Get all StatefulSets in monitoring namespace
+      command: >
+        kubectl get statefulsets -n monitoring
+        -o jsonpath='{.items[*].metadata.name}'
+      register: monitoring_statefulsets
+      changed_when: false
+      failed_when: false
+
+    - name: Inject proxy env vars into monitoring StatefulSets
+      command: >
+        kubectl set env statefulset/{{ item }}
+        HTTP_PROXY={{ HTTP_PROXY | quote }}
+        http_proxy={{ http_proxy | quote }}
+        HTTPS_PROXY={{ HTTPS_PROXY | quote }}
+        https_proxy={{ https_proxy | quote }}
+        NO_PROXY={{ NO_PROXY | quote }}
+        no_proxy={{ no_proxy | quote }}
+        -n monitoring
+      loop: "{{ monitoring_statefulsets.stdout.split() }}"
+      when: monitoring_statefulsets.stdout | length > 0
+      failed_when: false
+      changed_when: false
+
+    - name: Display proxy injection summary
+      debug:
+        msg:
+          - "✓ Proxy env vars injected directly into all existing workloads"
+          - "  tyr-system  — Deployments: {{ tyr_deployments.stdout.split() | length }}, DaemonSets: {{ tyr_daemonsets.stdout.split() | length }}, StatefulSets: {{ tyr_statefulsets.stdout.split() | length }}"
+          - "  monitoring  — Deployments: {{ monitoring_deployments.stdout.split() | length }}, DaemonSets: {{ monitoring_daemonsets.stdout.split() | length }}, StatefulSets: {{ monitoring_statefulsets.stdout.split() | length }}"
+          - "  (Kyverno will handle all future pods once CNI is installed)"
+
+  tags:
+    - proxy
+    - phase4_5
+
+################################################################################
+# Phase 5: Apply InfraManager Custom Resource
+################################################################################
+- name: Phase 5 - Apply InfraManager Instance
+  hosts: masters[0]
+  become: yes
+  gather_facts: no
+
+  vars:
+    # Kube-OVN version: defined only here (InfraManager spec). Override with -e kube_ovn_version=...
+    kube_ovn_version: "v1.15.0"
+    kubevirt_image_tag: "{{ tyr_kubevirt_image_tag | default('v1.7.0-ascendra.0') }}"
+    kubevirt_cpu_allocation_ratio: "{{ tyr_kubevirt_cpu_allocation_ratio | default(8) }}"
+
+  tasks:
+    - name: Create InfraManager manifest
+      copy:
+        content: |
+          apiVersion: infra.ascendra.cloud/v1alpha1
+          kind: InfraManager
+          metadata:
+            labels:
+              app.kubernetes.io/name: tyr
+            name: inframanager-sample
+            namespace: tyr-system
+          spec:
+            kubeOvn:
+              version: ""
+            kubeVirt:
+              imageTag: "{{ kubevirt_image_tag }}"
+              imagePullPolicy: Always
+              cpuAllocationRatio: {{ kubevirt_cpu_allocation_ratio }}
+              githubTokenRef:
+                name: tyr-github
+                key: token
+              kubeVirtSpec:
+                configuration:
+                  migrations:
+                    allowAutoConverge: true
+                    autoConvergeInitial: 90
+                    autoConvergeIncrement: 50
+                    # SAFE ALTERNATIVE TO POST-COPY:
+                    # This allows the controller to pause the VM to force completion
+                    # when convergence isn't happening naturally.
+                    allowWorkloadDisruption: true
+                    allowPostCopy: false
+                    # REMOVE NETWORK BOTTLENECKS:
+                    # 0 means unlimited bandwidth.
+                    bandwidthPerMigration: 0
+                    # CONTROL THE TIMEOUT:
+                    # Seconds per GiB before the "Pause" strategy is triggered.
+                    completionTimeoutPerGiB: 30
+        dest: /tmp/inframanager.yaml
+        mode: '0644'
+    
+    - name: Apply InfraManager custom resource
+      command: kubectl apply -f /tmp/inframanager.yaml
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      register: inframanager_apply
+    
+    - name: Display InfraManager status
+      debug:
+        msg: "✓ InfraManager custom resource applied successfully"
+      when: inframanager_apply.changed
+    
+    - name: Get InfraManager status
+      command: kubectl get inframanager -n tyr-system
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      register: inframanager_status
+      changed_when: false
+      failed_when: false
+    
+    - name: Display InfraManager status
+      debug:
+        msg: "{{ inframanager_status.stdout_lines }}"
+      when: inframanager_status.rc == 0
+    
+    - name: Remove temporary InfraManager manifest
+      file:
+        path: /tmp/inframanager.yaml
+        state: absent
+  
+  tags:
+    - inframanager
+    - phase5
+
+################################################################################
+# Phase 5b: Early Crash-Loop Detection (runs right after InfraManager apply)
+################################################################################
+- name: Phase 5b - Detect and Restart CrashLoopBackOff Workloads
+  hosts: masters[0]
+  become: yes
+  gather_facts: no
+
+  tasks:
+    - name: Wait 60s for initial workloads to start and reveal crash loops
+      pause:
+        seconds: 60
+
+    - name: Find pods in CrashLoopBackOff across all cluster namespaces
+      shell: |
+        kubectl get pods --all-namespaces --no-headers 2>/dev/null | \
+          awk '$4 == "CrashLoopBackOff" {print $1 " " $2}'
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      register: crashloop_pods
+      changed_when: false
+      failed_when: false
+
+    - name: Display detected crash-looping pods
+      debug:
+        msg: "CrashLoopBackOff pods detected: {{ crashloop_pods.stdout_lines }}"
+      when: crashloop_pods.stdout_lines | length > 0
+
+    - name: No crash loops detected
+      debug:
+        msg: "✓ No CrashLoopBackOff pods detected"
+      when: crashloop_pods.stdout_lines | length == 0
+
+    - name: Restart owner (DaemonSet / Deployment / StatefulSet) for each crash-looping pod
+      shell: |
+        NS="{{ item.split(' ')[0] }}"
+        POD="{{ item.split(' ')[1] }}"
+        OWNER_KIND=$(kubectl get pod "$POD" -n "$NS" \
+          -o jsonpath='{.metadata.ownerReferences[0].kind}' 2>/dev/null)
+        OWNER_NAME=$(kubectl get pod "$POD" -n "$NS" \
+          -o jsonpath='{.metadata.ownerReferences[0].name}' 2>/dev/null)
+        if [ "$OWNER_KIND" = "DaemonSet" ]; then
+          echo "Restarting DaemonSet $OWNER_NAME in $NS"
+          kubectl rollout restart daemonset "$OWNER_NAME" -n "$NS"
+        elif [ "$OWNER_KIND" = "ReplicaSet" ]; then
+          DEPLOY=$(kubectl get replicaset "$OWNER_NAME" -n "$NS" \
+            -o jsonpath='{.metadata.ownerReferences[0].name}' 2>/dev/null)
+          if [ -n "$DEPLOY" ]; then
+            echo "Restarting Deployment $DEPLOY in $NS"
+            kubectl rollout restart deployment "$DEPLOY" -n "$NS"
+          fi
+        elif [ "$OWNER_KIND" = "StatefulSet" ]; then
+          echo "Restarting StatefulSet $OWNER_NAME in $NS"
+          kubectl rollout restart statefulset "$OWNER_NAME" -n "$NS"
+        else
+          echo "Unknown owner kind '$OWNER_KIND' for pod $POD in $NS — skipping"
+        fi
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      loop: "{{ crashloop_pods.stdout_lines }}"
+      when: crashloop_pods.stdout_lines | length > 0
+      register: restart_result
+      changed_when: "'Restarting' in restart_result.stdout"
+      failed_when: false
+
+    - name: Wait 30s for restarted workloads to come back up
+      pause:
+        seconds: 30
+      when: crashloop_pods.stdout_lines | length > 0
+
+  tags:
+    - crashloop
+    - phase5b
+
+################################################################################
+# Phase 6: Wait for All Components to Be Ready
+################################################################################
+- name: Phase 6 - Verify All Components Running
+  hosts: masters[0]
+  become: yes
+  gather_facts: no
+
+  tasks:
+    # ============================================
+    # Wait for Tyr platform services
+    # ============================================
+    - name: Wait for Tyr platform services to be ready
+      command: >
+        kubectl wait --for=condition=Ready pods
+        --all -n tyr-system
+        --timeout=300s
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      register: tyr_pods_ready
+      changed_when: false
+      retries: 3
+      delay: 30
+      until: tyr_pods_ready.rc == 0
+
+    - name: Verify Tyr platform services are running
+      command: kubectl get pods -n tyr-system --no-headers
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      register: tyr_pods_status
+      changed_when: false
+
+    - name: Check Tyr services health
+      assert:
+        that:
+          - tyr_pods_status.stdout_lines | length > 0
+        fail_msg: "No platform services found in tyr-system"
+        success_msg: "✓ Platform services are running ({{ tyr_pods_status.stdout_lines | length }} services)"
+
+    # ============================================
+    # Wait for virtual compute layer
+    # ============================================
+    - name: Wait for virtual compute namespace to be created
+      command: kubectl get namespace kubevirt
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      register: kubevirt_ns_check
+      changed_when: false
+      retries: 20
+      delay: 15
+      until: kubevirt_ns_check.rc == 0
+
+    - name: Wait for virtual compute components to be ready
+      command: >
+        kubectl wait --for=condition=Ready pods
+        --all -n kubevirt
+        --timeout=600s
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      register: kubevirt_pods_ready
+      changed_when: false
+      retries: 3
+      delay: 30
+      until: kubevirt_pods_ready.rc == 0
+
+    - name: Verify virtual compute components are running
+      command: kubectl get pods -n kubevirt --no-headers
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      register: kubevirt_pods_status
+      changed_when: false
+
+    - name: Check virtual compute health
+      assert:
+        that:
+          - kubevirt_pods_status.stdout_lines | length > 0
+        fail_msg: "Virtual compute components not found"
+        success_msg: "✓ Virtual compute is running ({{ kubevirt_pods_status.stdout_lines | length }} components)"
+
+    # ============================================
+    # Wait for network layer
+    # ============================================
+    - name: Wait for network layer components to be ready
+      shell: |
+        kubectl get pods -n kube-system -l app=kube-ovn-controller --no-headers 2>/dev/null | grep -c "Running"
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      register: kube_ovn_running
+      changed_when: false
+      retries: 20
+      delay: 15
+      until: kube_ovn_running.stdout | int > 0
+      failed_when: false
+
+    - name: Verify network layer components are running
+      shell: |
+        kubectl get pods -n kube-system --no-headers 2>/dev/null | grep -c "kube-ovn"
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      register: kube_ovn_count
+      changed_when: false
+      failed_when: false
+
+    - name: Check network layer health
+      debug:
+        msg: "✓ Network layer is running ({{ kube_ovn_count.stdout | default('0') }} components)"
+
+    # ============================================
+    # Final health check
+    # ============================================
+    - name: Verify all components running - final check
+      shell: |
+        echo "=== Platform Services (tyr-system) ==="
+        kubectl get pods -n tyr-system --no-headers 2>/dev/null | awk '{print $1, $3}'
+        echo ""
+        echo "=== Virtual Compute (kubevirt) ==="
+        kubectl get pods -n kubevirt --no-headers 2>/dev/null | awk '{print $1, $3}'
+        echo ""
+        echo "=== Network (kube-system) ==="
+        kubectl get pods -n kube-system --no-headers 2>/dev/null | grep kube-ovn | awk '{print $1, $3}'
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      register: all_components
+      changed_when: false
+
+    - name: Display deployment summary
+      debug:
+        msg:
+          - "=========================================="
+          - "Infrastructure Configuration Complete!"
+          - "=========================================="
+          - ""
+          - "All components are running:"
+          - "{{ all_components.stdout }}"
+          - ""
+          - "Deployment Details:"
+          - "  - Version: {{ tyr_version | default('1.0.7') }}"
+          - "  - Namespace: tyr-system"
+          - "  - Dashboard URL: http://{{ master_public_ip | default(ansible_host) }}:30080"
+          - ""
+          - "=========================================="
+  
+  tags:
+    - summary
+    - verification
+    - phase6
+
+################################################################################
+# Phase 6.5: Verify proxy env vars on every workload; inject where missing
+# Runs after all namespaces are up (tyr-system, kubevirt, monitoring, kube-system).
+# For each Deployment, DaemonSet, and StatefulSet in each namespace we inspect
+# the pod-template env; if HTTP_PROXY is absent we inject all six proxy variables.
+# This is idempotent — workloads that already have the vars are left untouched.
+################################################################################
+- name: Phase 6.5 - Verify and Inject Proxy Env Vars on All Workloads
+  hosts: masters[0]
+  become: yes
+  gather_facts: no
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+
+  tasks:
+    - name: Skip phase if proxy is not enabled
+      meta: end_play
+      when: not (proxy_enabled | default(false) | bool)
+
+    - name: Check every workload for proxy env vars and inject where missing
+      shell: |
+        INJECTED=0
+        for NS in tyr-system kubevirt monitoring kube-system; do
+          kubectl get namespace "$NS" > /dev/null 2>&1 || continue
+          for KIND in deployment daemonset statefulset; do
+            NAMES=$(kubectl get "$KIND" -n "$NS" \
+              -o jsonpath='{.items[*].metadata.name}' 2>/dev/null)
+            for NAME in $NAMES; do
+              HAS_PROXY=$(kubectl get "$KIND/$NAME" -n "$NS" \
+                -o jsonpath='{range .spec.template.spec.containers[*]}{range .env[*]}{.name}{"\n"}{end}{end}' \
+                2>/dev/null | grep -c '^HTTP_PROXY$' || true)
+              if [ "$HAS_PROXY" -eq 0 ]; then
+                echo "INJECT: $KIND/$NAME in $NS — proxy vars missing, injecting"
+                kubectl set env "$KIND/$NAME" \
+                  HTTP_PROXY={{ HTTP_PROXY | quote }} \
+                  http_proxy={{ http_proxy | quote }} \
+                  HTTPS_PROXY={{ HTTPS_PROXY | quote }} \
+                  https_proxy={{ https_proxy | quote }} \
+                  NO_PROXY={{ NO_PROXY | quote }} \
+                  no_proxy={{ no_proxy | quote }} \
+                  -n "$NS"
+                INJECTED=$((INJECTED + 1))
+              else
+                echo "OK: $KIND/$NAME in $NS already has proxy vars"
+              fi
+            done
+          done
+        done
+        echo "Summary: $INJECTED workload(s) had proxy vars injected"
+      register: proxy_check_inject
+      changed_when: "'INJECT:' in proxy_check_inject.stdout"
+      failed_when: false
+
+    - name: Display proxy verification and injection summary
+      debug:
+        msg: "{{ proxy_check_inject.stdout_lines }}"
+
+  tags:
+    - proxy
+    - phase6_5
+
+################################################################################
+# Phase 7: Install Kyverno + Apply Proxy ClusterPolicy
+# Runs LAST — after Tyr is deployed and proxy vars are already injected into
+# existing workloads. Kyverno will handle all NEW pods going forward.
+# Requires CNI to be installed (nodes must be Ready). If CNI is not yet
+# installed this phase will block for up to 10 minutes waiting for it.
+################################################################################
+- name: Phase 7 - Install Kyverno and Configure Proxy Injection
+  hosts: masters[0]
+  become: yes
+  gather_facts: no
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+
+  tasks:
+    - name: Wait for all nodes to be Ready (CNI must be installed)
+      command: kubectl wait --for=condition=Ready nodes --all --timeout=600s
+      changed_when: false
+      # If this times out, install a CNI plugin on the master, e.g.:
+      #   Calico:  kubectl apply -f https://raw.githubusercontent.com/projectcalico/calico/v3.27.0/manifests/calico.yaml
+      #   Flannel: kubectl apply -f https://github.com/flannel-io/flannel/releases/latest/download/kube-flannel.yml
+      #   Cilium:  cilium install
+
+    - name: Add Kyverno Helm repository
+      command: helm repo add kyverno https://kyverno.github.io/kyverno/
+      changed_when: false
+      failed_when: false
+
+    - name: Update Helm repositories
+      command: helm repo update
+      changed_when: false
+
+    - name: Install Kyverno via Helm
+      command: >
+        helm upgrade --install kyverno kyverno/kyverno
+        --namespace kyverno --create-namespace
+        --wait --timeout 5m
+
+    - name: Wait for Kyverno admission controller to be ready
+      command: >
+        kubectl rollout status deployment/kyverno-admission-controller
+        -n kyverno --timeout=120s
+      changed_when: false
+
+    - name: Apply proxy injection ClusterPolicy
+      when: proxy_enabled | default(false) | bool
+      shell: |
+        kubectl apply -f - <<'EOF'
+        apiVersion: kyverno.io/v1
+        kind: ClusterPolicy
+        metadata:
+          name: inject-proxy-env
+          annotations:
+            policies.kyverno.io/title: Inject Proxy Environment Variables
+            policies.kyverno.io/description: >-
+              Automatically injects HTTP_PROXY, HTTPS_PROXY and NO_PROXY
+              environment variables into every new pod going forward.
+        spec:
+          rules:
+          - name: inject-proxy-env-vars
+            match:
+              any:
+              - resources:
+                  kinds:
+                  - Pod
+            exclude:
+              any:
+              - resources:
+                  namespaces:
+                  - kube-system
+                  - kyverno
+            mutate:
+              patchStrategicMerge:
+                spec:
+                  containers:
+                  - (name): "?*"
+                    env:
+                    - name: HTTP_PROXY
+                      value: "{{ HTTP_PROXY }}"
+                    - name: http_proxy
+                      value: "{{ http_proxy }}"
+                    - name: HTTPS_PROXY
+                      value: "{{ HTTPS_PROXY }}"
+                    - name: https_proxy
+                      value: "{{ https_proxy }}"
+                    - name: NO_PROXY
+                      value: "{{ NO_PROXY }}"
+                    - name: no_proxy
+                      value: "{{ no_proxy }}"
+                  initContainers:
+                  - (name): "?*"
+                    env:
+                    - name: HTTP_PROXY
+                      value: "{{ HTTP_PROXY }}"
+                    - name: http_proxy
+                      value: "{{ http_proxy }}"
+                    - name: HTTPS_PROXY
+                      value: "{{ HTTPS_PROXY }}"
+                    - name: https_proxy
+                      value: "{{ https_proxy }}"
+                    - name: NO_PROXY
+                      value: "{{ NO_PROXY }}"
+                    - name: no_proxy
+                      value: "{{ no_proxy }}"
+        EOF
+      changed_when: true
+
+    - name: Display Kyverno status
+      debug:
+        msg:
+          - "✓ Kyverno installed and ClusterPolicy applied"
+          - "  All new pods will automatically receive proxy env vars"
+
+  tags:
+    - kyverno
+    - phase7
+

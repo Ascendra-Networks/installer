@@ -1,11 +1,7 @@
 ---
-# Kubernetes Dataplane (Worker) Node Setup
-# Join worker nodes to the Kubernetes cluster
+# Kubernetes Worker: uses helper (kubelet_swap), then worker-only (kubeadm join, verify).
 
-# ============================================
 # Check if Already Joined
-# ============================================
-
 - name: Check if node is already part of a cluster
   stat:
     path: /etc/kubernetes/kubelet.conf
@@ -17,9 +13,23 @@
   when: kubelet_conf_exists.stat.exists
 
 # ============================================
-# Validate Join Command Exists
+# Upgrade path (when node already joined and packages were upgraded in Phase 1)
 # ============================================
+- name: Run kubeadm upgrade node (reconfigure kubelet for new version)
+  command: kubeadm upgrade node
+  register: kubeadm_upgrade_node
+  when: kubelet_conf_exists.stat.exists
 
+- name: Restart kubelet after node upgrade
+  systemd:
+    name: kubelet
+    state: restarted
+    daemon_reload: yes
+  when:
+    - kubelet_conf_exists.stat.exists
+    - kubeadm_upgrade_node is changed
+
+# Validate Join Command Exists
 - name: Check if join command file exists
   stat:
     path: /tmp/kubeadm_join_command.sh
@@ -37,10 +47,7 @@
     - not join_command_file.stat.exists
   run_once: true
 
-# ============================================
 # Join Node to Cluster
-# ============================================
-
 - name: Read join command from file
   slurp:
     src: /tmp/kubeadm_join_command.sh
@@ -78,64 +85,41 @@
     - not kubelet_conf_exists.stat.exists
     - join_output.changed
 
-# ============================================
-# Configure Kubelet for Swap Support
-# ============================================
+# Wait for kubelet config to exist (worker: created after join), then use helper
+- name: Wait for kubelet config to be created
+  wait_for:
+    path: /var/lib/kubelet/config.yaml
+    timeout: 60
+  when: not kubelet_conf_exists.stat.exists
 
 - name: Configure kubelet for swap support
-  block:
-    - name: Wait for kubelet config to be created
-      wait_for:
-        path: /var/lib/kubelet/config.yaml
-        timeout: 60
+  include_tasks: ../../helpers/tasks/kubelet_swap.yml
 
-    - name: Backup kubelet config
-      copy:
-        src: /var/lib/kubelet/config.yaml
-        dest: /var/lib/kubelet/config.yaml.backup
-        remote_src: yes
-      ignore_errors: yes
-
-    - name: Update failSwapOn to false
-      lineinfile:
-        path: /var/lib/kubelet/config.yaml
-        regexp: '^failSwapOn:'
-        line: 'failSwapOn: false'
-        state: present
-
-    - name: Add memorySwap configuration
-      blockinfile:
-        path: /var/lib/kubelet/config.yaml
-        marker: "# {mark} ANSIBLE MANAGED BLOCK - Swap Support"
-        block: |
-          memorySwap:
-            swapBehavior: LimitedSwap
-        insertafter: EOF
-
-    - name: Restart kubelet after swap configuration
-      systemd:
-        name: kubelet
-        state: restarted
-
-# ============================================
 # Verify Node Health
-# ============================================
-
-- name: Wait for kubelet to be ready
+- name: Wait for kubelet to be ready (systemd)
   systemd:
     name: kubelet
     state: started
     enabled: yes
+  when: ansible_service_mgr == 'systemd'
 
 - name: Wait a moment for node to register with cluster
-  pause:
-    seconds: 10
+  command: sleep 10
+  changed_when: false
 
-- name: Verify kubelet is running
+- name: Verify kubelet is running (systemd)
   command: systemctl is-active kubelet
   register: kubelet_active
   changed_when: false
   failed_when: kubelet_active.stdout != "active"
+  when: ansible_service_mgr == 'systemd'
+
+- name: Verify kubelet is running (non-systemd)
+  shell: pgrep -x kubelet
+  register: kubelet_pid
+  changed_when: false
+  failed_when: kubelet_pid.rc != 0
+  when: ansible_service_mgr != 'systemd'
 
 - name: Show success message
   debug:
@@ -147,7 +131,3 @@
       - "Kubelet is running with swap support enabled."
       - "Check master node for node status: kubectl get nodes"
       - ""
-
-
-
-

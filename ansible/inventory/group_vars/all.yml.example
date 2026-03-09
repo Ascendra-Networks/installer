@@ -1,0 +1,20 @@
+---
+# Group variables for inventory (optional).
+# Copy to all.yml and set values as needed.
+#
+#   cp group_vars/all.yml.example group_vars/all.yml
+
+# Ansible connection to target machines (SSH)
+ansible_user: asc
+ansible_password: asc123
+ansible_become_pass: asc123
+
+# Example: Kubernetes / cluster settings (adjust for your playbooks)
+kubernetes_version: '1.31'
+# Set to true to tear down the current cluster and install fresh at kubernetes_version (no step-by-step upgrade).
+# k8s_reset_cluster: false
+os_type: ubuntu
+
+# Example: GHCR / registry (required for Tyr/Dashboard playbooks)
+ghcr_username: asc
+ghcr_password: asc123

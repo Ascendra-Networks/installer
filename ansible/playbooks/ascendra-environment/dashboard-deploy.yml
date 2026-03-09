@@ -3,6 +3,48 @@
 # Deploys local-path storage, InfluxDB credentials, and the management-dashboard Helm chart
 
 ################################################################################
+# Phase 0: Deploy Metrics Server
+################################################################################
+- name: Phase 0 - Deploy Metrics Server
+  hosts: masters[0]
+  become: yes
+  gather_facts: no
+
+  tasks:
+    - name: Apply metrics-server manifests
+      command: >
+        kubectl apply -f
+        https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      register: metrics_server_apply
+      changed_when: "'configured' in metrics_server_apply.stdout or 'created' in metrics_server_apply.stdout"
+
+    - name: Patch metrics-server to allow insecure TLS (kubelet self-signed certs)
+      command: >
+        kubectl patch deployment metrics-server -n kube-system --type='json'
+        -p='[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--kubelet-insecure-tls"}]'
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      register: metrics_server_patch
+      changed_when: "'patched' in metrics_server_patch.stdout"
+
+    - name: Wait for metrics-server deployment to be available
+      command: kubectl wait --for=condition=available --timeout=60s deployment/metrics-server -n kube-system
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      register: metrics_server_wait
+      changed_when: false
+
+    - name: Display metrics-server status
+      debug:
+        msg: "✓ metrics-server is deployed and available"
+
+  tags:
+    - metrics-server
+    - phase0
+
+################################################################################
 # Phase 1: Create Monitoring Namespace and Registry Secret
 ################################################################################
 - name: Phase 1 - Setup Monitoring Namespace
@@ -10,18 +52,13 @@
   become: yes
   gather_facts: no
 
-  vars_files:
-    - ../inventory/group_vars/all.yml
-    - ../inventory/group_vars/masters.yml
-
   tasks:
     - name: Verify required variables are defined
       assert:
         that:
-          - tyr_ghcr_username is defined
-          - tyr_ghcr_password is defined
-          - dashboard_version is defined
-        fail_msg: "Required variables not defined. Please set tyr_ghcr_username, tyr_ghcr_password, and dashboard_version"
+          - ghcr_username is defined
+          - ghcr_password is defined
+        fail_msg: "Required variables not defined. Please set ghcr_username and ghcr_password"
         success_msg: "✓ All required variables are defined"
 
     - name: Check if monitoring namespace exists
@@ -42,35 +79,7 @@
       debug:
         msg: "✓ Namespace monitoring {{ 'created' if monitoring_ns_check.rc != 0 else 'already exists' }}"
 
-    - name: Check if ghcr-secret exists in monitoring
-      command: kubectl get secret ghcr-secret -n monitoring
-      environment:
-        KUBECONFIG: /etc/kubernetes/admin.conf
-      register: monitoring_secret_check
-      changed_when: false
-      failed_when: false
-
-    - name: Delete existing ghcr-secret in monitoring
-      command: kubectl delete secret ghcr-secret -n monitoring
-      environment:
-        KUBECONFIG: /etc/kubernetes/admin.conf
-      when: monitoring_secret_check.rc == 0
-      no_log: true
-
-    - name: Create docker-registry secret for GHCR in monitoring
-      command: >
-        kubectl create secret docker-registry ghcr-secret
-        --docker-server=ghcr.io
-        --docker-username={{ tyr_ghcr_username }}
-        --docker-password={{ tyr_ghcr_password }}
-        --namespace=monitoring
-      environment:
-        KUBECONFIG: /etc/kubernetes/admin.conf
-      no_log: true
-
-    - name: Display secret status
-      debug:
-        msg: "✓ Docker registry secret 'ghcr-secret' created in monitoring namespace"
+    # GHCR pull secret is created in monitoring by tyr-deploy (ghcr_secret_namespaces). Run tyr-deploy first.
 
   tags:
     - namespace
@@ -84,10 +93,6 @@
   hosts: masters[0]
   become: yes
   gather_facts: no
-
-  vars_files:
-    - ../inventory/group_vars/all.yml
-    - ../inventory/group_vars/masters.yml
 
   tasks:
     - name: Apply local-path-provisioner
@@ -128,14 +133,10 @@
   become: yes
   gather_facts: no
 
-  vars_files:
-    - ../inventory/group_vars/all.yml
-    - ../inventory/group_vars/masters.yml
-
   tasks:
     - name: Login to GHCR with Helm
       shell: |
-        echo '{{ tyr_ghcr_password }}' | helm registry login ghcr.io --username {{ tyr_ghcr_username }} --password-stdin
+        echo '{{ ghcr_password }}' | helm registry login ghcr.io --username {{ ghcr_username }} --password-stdin
       register: helm_login
       changed_when: "'Login Succeeded' in helm_login.stdout"
       failed_when: false
@@ -143,7 +144,7 @@
 
     - name: Login to Docker registry as fallback
       shell: |
-        echo '{{ tyr_ghcr_password }}' | docker login ghcr.io --username {{ tyr_ghcr_username }} --password-stdin
+        echo '{{ ghcr_password }}' | docker login ghcr.io --username {{ ghcr_username }} --password-stdin
       register: docker_login
       changed_when: false
       failed_when: false
@@ -164,7 +165,7 @@
           1. Verify token has 'read:packages' scope: https://github.com/settings/tokens
           2. Test manually on master node:
              ssh ubuntu@{{ inventory_hostname }}
-             echo 'YOUR_TOKEN' | helm registry login ghcr.io --username {{ tyr_ghcr_username }} --password-stdin
+             echo 'YOUR_TOKEN' | helm registry login ghcr.io --username {{ ghcr_username }} --password-stdin
 
           Helm login error: {{ helm_login.stderr | default('Unknown') }}
           Docker login error: {{ docker_login.stderr | default('Not attempted') if docker_login is defined else 'Not attempted' }}
@@ -181,10 +182,6 @@
   hosts: masters[0]
   become: yes
   gather_facts: no
-
-  vars_files:
-    - ../inventory/group_vars/all.yml
-    - ../inventory/group_vars/masters.yml
 
   tasks:
     - name: Check if influxdb-credentials secret exists
@@ -223,10 +220,6 @@
   become: yes
   gather_facts: no
 
-  vars_files:
-    - ../inventory/group_vars/all.yml
-    - ../inventory/group_vars/masters.yml
-
   tasks:
     - name: Check if management-dashboard is already installed
       command: helm list -n monitoring -o json
@@ -249,15 +242,15 @@
     - name: Install Management Dashboard using Helm
       command: >
         helm install management-dashboard oci://ghcr.io/ascendra-networks/charts/management-dashboard
-        --version {{ dashboard_version }}
+        --version {{ dashboard_version | default('1.0.26') }}
         --namespace monitoring
         --create-namespace
         --set github.createSecret=true
-        --set github.token={{ tyr_ghcr_password }}
-        --set imagePullSecrets[0].name=ghcr-secret
-        --set backend.backend.imagePullSecrets[0].name=ghcr-secret
-        --set ui.ui.imagePullSecrets[0].name=ghcr-secret
-        --set data-collector.imagePullSecrets[0].name=ghcr-secret
+        --set github.token={{ ghcr_password }}
+        --set imagePullSecrets[0].name={{ ghcr_secret_name | default('ghcr-secret') }}
+        --set backend.backend.imagePullSecrets[0].name={{ ghcr_secret_name | default('ghcr-secret') }}
+        --set ui.ui.imagePullSecrets[0].name={{ ghcr_secret_name | default('ghcr-secret') }}
+        --set data-collector.imagePullSecrets[0].name={{ ghcr_secret_name | default('ghcr-secret') }}
       environment:
         KUBECONFIG: /etc/kubernetes/admin.conf
       when: not dashboard_installed
@@ -267,14 +260,14 @@
     - name: Upgrade Management Dashboard using Helm (if already installed)
       command: >
         helm upgrade management-dashboard oci://ghcr.io/ascendra-networks/charts/management-dashboard
-        --version {{ dashboard_version }}
+        --version {{ dashboard_version | default('1.0.26') }}
         --namespace monitoring
         --set github.createSecret=true
-        --set github.token={{ tyr_ghcr_password }}
-        --set imagePullSecrets[0].name=ghcr-secret
-        --set backend.backend.imagePullSecrets[0].name=ghcr-secret
-        --set ui.ui.imagePullSecrets[0].name=ghcr-secret
-        --set data-collector.imagePullSecrets[0].name=ghcr-secret
+        --set github.token={{ ghcr_password }}
+        --set imagePullSecrets[0].name={{ ghcr_secret_name | default('ghcr-secret') }}
+        --set backend.backend.imagePullSecrets[0].name={{ ghcr_secret_name | default('ghcr-secret') }}
+        --set ui.ui.imagePullSecrets[0].name={{ ghcr_secret_name | default('ghcr-secret') }}
+        --set data-collector.imagePullSecrets[0].name={{ ghcr_secret_name | default('ghcr-secret') }}
       environment:
         KUBECONFIG: /etc/kubernetes/admin.conf
       when: dashboard_installed
@@ -283,7 +276,7 @@
 
     - name: Display Dashboard deployment status
       debug:
-        msg: "✓ Management Dashboard {{ 'installed' if not dashboard_installed else 'upgraded' }} successfully (version: {{ dashboard_version }})"
+        msg: "✓ Management Dashboard {{ 'installed' if not dashboard_installed else 'upgraded' }} successfully (version: {{ dashboard_version | default('1.0.26') }})"
 
   tags:
     - deploy
@@ -296,10 +289,6 @@
   hosts: masters[0]
   become: yes
   gather_facts: no
-
-  vars_files:
-    - ../inventory/group_vars/all.yml
-    - ../inventory/group_vars/masters.yml
 
   vars:
     dashboard_core_deployments:
@@ -329,27 +318,10 @@
       register: dashboard_pods_status
       changed_when: false
 
-    - name: Get UI pod node IP and service port
-      shell: |
-        NODE_IP=$(kubectl get pod -n monitoring -l app.kubernetes.io/name=ui -o jsonpath='{.items[0].status.hostIP}' 2>/dev/null || echo "")
-        if [ -z "$NODE_IP" ]; then
-          NODE_IP=$(kubectl get pod -n monitoring -l app=ui -o jsonpath='{.items[0].status.hostIP}' 2>/dev/null || echo "")
-        fi
-        if [ -z "$NODE_IP" ]; then
-          NODE_IP=$(kubectl get pod -n monitoring $(kubectl get pods -n monitoring --no-headers | grep '^ui-' | head -1 | awk '{print $1}') -o jsonpath='{.status.hostIP}' 2>/dev/null || echo "")
-        fi
-        SVC_TYPE=$(kubectl get svc ui -n monitoring -o jsonpath='{.spec.type}' 2>/dev/null || echo "")
-        NODE_PORT=$(kubectl get svc ui -n monitoring -o jsonpath='{.spec.ports[0].nodePort}' 2>/dev/null || echo "")
-        CLUSTER_IP_PORT=$(kubectl get svc ui -n monitoring -o jsonpath='{.spec.ports[0].port}' 2>/dev/null || echo "80")
-        if [ "$SVC_TYPE" = "NodePort" ] && [ -n "$NODE_PORT" ]; then
-          echo "DASHBOARD_ACCESS_URL=http://${NODE_IP}:${NODE_PORT}"
-        else
-          echo "DASHBOARD_ACCESS_URL=http://${NODE_IP}:${CLUSTER_IP_PORT}"
-        fi
-      environment:
-        KUBECONFIG: /etc/kubernetes/admin.conf
-      register: dashboard_access_info
-      changed_when: false
+    - name: Set dashboard access URL
+      set_fact:
+        dashboard_access_info:
+          stdout: "DASHBOARD_ACCESS_URL=http://{{ ansible_host }}:30080"
 
     - name: Display deployment summary
       debug:
@@ -362,7 +334,7 @@
           - "{{ dashboard_pods_status.stdout }}"
           - ""
           - "Deployment Details:"
-          - "  - Version: {{ dashboard_version }}"
+          - "  - Version: {{ dashboard_version | default('1.0.26') }}"
           - "  - Namespace: monitoring"
           - "  - {{ dashboard_access_info.stdout }}"
           - ""

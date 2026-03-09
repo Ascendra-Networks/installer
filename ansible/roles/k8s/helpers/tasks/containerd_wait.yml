@@ -1,0 +1,45 @@
+---
+# Shared: ensure containerd is running and socket is accessible (used by master before kubeadm init).
+
+- name: Check containerd service status (systemd)
+  systemd:
+    name: containerd
+    state: started
+    enabled: yes
+  when: ansible_service_mgr == 'systemd'
+  failed_when: false
+
+- name: Start containerd manually if service failed (systemd)
+  shell: |
+    systemctl daemon-reload
+    systemctl restart containerd
+    sleep 3
+  when: ansible_service_mgr == 'systemd'
+  failed_when: false
+
+- name: Wait for containerd socket to appear
+  wait_for:
+    path: /var/run/containerd/containerd.sock
+    timeout: 30
+  failed_when: false
+
+- name: Fix containerd socket permissions
+  file:
+    path: /var/run/containerd/containerd.sock
+    mode: '0660'
+    owner: root
+    group: root
+  failed_when: false
+
+- name: Verify containerd is responsive
+  command: crictl --runtime-endpoint unix:///var/run/containerd/containerd.sock info
+  register: containerd_check
+  retries: 5
+  delay: 5
+  until: containerd_check.rc == 0
+  failed_when: false
+
+- name: Debug containerd status if not responsive
+  debug:
+    msg: "WARNING: containerd may not be running properly. crictl info returned: {{ containerd_check.stderr | default('unknown') }}"
+  when: containerd_check.rc is defined and containerd_check.rc != 0

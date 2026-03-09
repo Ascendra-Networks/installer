@@ -1,0 +1,40 @@
+---
+# Shared: configure kubelet for swap support (used by master.yml and worker.yml).
+# Caller must ensure /var/lib/kubelet/config.yaml exists (worker: wait_for before including).
+
+- name: Backup kubelet config
+  copy:
+    src: /var/lib/kubelet/config.yaml
+    dest: /var/lib/kubelet/config.yaml.backup
+    remote_src: yes
+  ignore_errors: yes
+
+- name: Update failSwapOn to false
+  lineinfile:
+    path: /var/lib/kubelet/config.yaml
+    regexp: '^failSwapOn:'
+    line: 'failSwapOn: false'
+    state: present
+
+- name: Add memorySwap configuration
+  blockinfile:
+    path: /var/lib/kubelet/config.yaml
+    marker: "# {mark} ANSIBLE MANAGED BLOCK - Swap Support"
+    block: |
+      memorySwap:
+        swapBehavior: LimitedSwap
+    insertafter: EOF
+
+- name: Restart kubelet after swap configuration (systemd)
+  systemd:
+    name: kubelet
+    state: restarted
+  when: ansible_service_mgr == 'systemd'
+
+- name: Restart kubelet after swap configuration (non-systemd)
+  shell: |
+    pkill kubelet || true
+    sleep 1
+    nohup kubelet > /var/log/kubelet.log 2>&1 &
+    sleep 3
+  when: ansible_service_mgr != 'systemd'

@@ -2,6 +2,65 @@
 # SUSE/SLES Prerequisites - Package Installation and K8s Repo Setup
 
 # ============================================
+# Proxy Configuration (systemd drop-in)
+# Must run before containerd/kubelet so all spawned services inherit proxy vars.
+# ============================================
+
+- name: Create systemd system.conf.d directory
+  file:
+    path: /etc/systemd/system.conf.d
+    state: directory
+    mode: '0755'
+  when: proxy_enabled | default(false) | bool
+
+- name: Write systemd proxy drop-in (zzzz-proxy.conf)
+  copy:
+    dest: /etc/systemd/system.conf.d/zzzz-proxy.conf
+    content: |
+      [Manager]
+      DefaultEnvironment="HTTP_PROXY={{ HTTP_PROXY }}"
+      DefaultEnvironment="http_proxy={{ http_proxy }}"
+      DefaultEnvironment="HTTPS_PROXY={{ HTTPS_PROXY }}"
+      DefaultEnvironment="https_proxy={{ https_proxy }}"
+      DefaultEnvironment="NO_PROXY={{ NO_PROXY }}"
+      DefaultEnvironment="no_proxy={{ no_proxy }}"
+    mode: '0644'
+  when: proxy_enabled | default(false) | bool
+
+- name: Remove systemd proxy drop-in when proxy is disabled
+  file:
+    path: /etc/systemd/system.conf.d/zzzz-proxy.conf
+    state: absent
+  when: not (proxy_enabled | default(false) | bool)
+
+- name: Write proxy vars to /etc/environment (interactive shells and non-systemd tools)
+  blockinfile:
+    path: /etc/environment
+    marker: "# {mark} ASCENDRA PROXY"
+    block: |
+      HTTP_PROXY="{{ HTTP_PROXY }}"
+      http_proxy="{{ http_proxy }}"
+      HTTPS_PROXY="{{ HTTPS_PROXY }}"
+      https_proxy="{{ https_proxy }}"
+      NO_PROXY="{{ NO_PROXY }}"
+      no_proxy="{{ no_proxy }}"
+    create: yes
+    mode: '0644'
+  when: proxy_enabled | default(false) | bool
+
+- name: Remove proxy vars from /etc/environment when proxy is disabled
+  blockinfile:
+    path: /etc/environment
+    marker: "# {mark} ASCENDRA PROXY"
+    block: ""
+  when: not (proxy_enabled | default(false) | bool)
+  failed_when: false
+
+- name: Reload systemd manager to apply proxy environment
+  command: systemctl daemon-reexec
+  when: proxy_enabled | default(false) | bool
+
+# ============================================
 # Refresh Repositories and Install Base Packages
 # ============================================
 
@@ -56,17 +115,9 @@
   delay: 5
   failed_when: false
 
-- name: Enable and start Docker service (systemd)
-  systemd:
-    name: docker
-    enabled: yes
-    state: started
-  failed_when: false
-  when: ansible_service_mgr == 'systemd'
-
 - name: Create containerd configuration directory
   file:
-    path: "{{ containerd_config_dir }}"
+    path: "{{ containerd_config_dir | default('/etc/containerd') }}"
     state: directory
     mode: '0755'
 
@@ -77,19 +128,19 @@
   failed_when: false
 
 - name: Check if containerd config has actual content
-  shell: grep -c '^\[' {{ containerd_config_file }} 2>/dev/null || echo "0"
+  shell: grep -c '^\[' {{ containerd_config_file | default('/etc/containerd/config.toml') }} 2>/dev/null || echo "0"
   register: containerd_config_sections
   changed_when: false
   failed_when: false
 
 - name: Generate default containerd configuration
-  shell: "{{ containerd_bin.stdout | trim }} config default > {{ containerd_config_file }}"
+  shell: "{{ containerd_bin.stdout | trim }} config default > {{ containerd_config_file | default('/etc/containerd/config.toml') }}"
   when: containerd_bin.stdout | length > 0 and (containerd_config_sections.stdout | trim | int) == 0
   failed_when: false
 
 - name: Configure containerd to use systemd cgroup driver
   replace:
-    path: "{{ containerd_config_file }}"
+    path: "{{ containerd_config_file | default('/etc/containerd/config.toml') }}"
     regexp: 'SystemdCgroup = false'
     replace: 'SystemdCgroup = true'
   when: ansible_service_mgr == 'systemd'
@@ -102,8 +153,8 @@
 
 - name: Configure containerd native snapshotter for container environments
   shell: |
-    if [ -f {{ containerd_config_file }} ]; then
-      sed -i 's/snapshotter = "overlayfs"/snapshotter = "native"/' {{ containerd_config_file }}
+    if [ -f {{ containerd_config_file | default('/etc/containerd/config.toml') }} ]; then
+      sed -i 's/snapshotter = "overlayfs"/snapshotter = "native"/' {{ containerd_config_file | default('/etc/containerd/config.toml') }}
     fi
   when: dockerenv_check.stat.exists or ansible_service_mgr != 'systemd'
   failed_when: false
@@ -128,7 +179,7 @@
 
 - name: Fall back to native snapshotter if overlayfs whiteouts not supported
   shell: |
-    sed -i 's/snapshotter = "overlayfs"/snapshotter = "native"/' {{ containerd_config_file }}
+    sed -i 's/snapshotter = "overlayfs"/snapshotter = "native"/' {{ containerd_config_file | default('/etc/containerd/config.toml') }}
   when: overlayfs_xattr_test.stdout is defined and "not_supported" in overlayfs_xattr_test.stdout
   failed_when: false
 
@@ -203,10 +254,14 @@
 # ============================================
 # Install Kubernetes Tools
 # ============================================
+# pkgs.k8s.io repo path uses major.minor only (e.g. v1.35), not full version (v1.35.1)
+- name: Set Kubernetes repo version (major.minor for repo URL)
+  set_fact:
+    kubernetes_version_repo: "{{ (kubernetes_version | default('1.31')) | regex_replace('^(\\d+\\.\\d+).*', '\\1') }}"
 
 - name: Import Kubernetes RPM GPG key
   rpm_key:
-    key: "https://pkgs.k8s.io/core:/stable:/v{{ kubernetes_version }}/rpm/repodata/repomd.xml.key"
+    key: "https://pkgs.k8s.io/core:/stable:/v{{ kubernetes_version_repo }}/rpm/repodata/repomd.xml.key"
     state: present
   retries: 3
   delay: 10
@@ -220,7 +275,7 @@
 - name: Add Kubernetes zypper repository
   command: >
     zypper addrepo --gpgcheck --refresh --priority 120
-    https://pkgs.k8s.io/core:/stable:/v{{ kubernetes_version }}/rpm/
+    https://pkgs.k8s.io/core:/stable:/v{{ kubernetes_version_repo }}/rpm/
     kubernetes
   when: k8s_repo_check.rc != 0
   retries: 3
@@ -232,12 +287,17 @@
   retries: 3
   delay: 10
 
-- name: Install Kubernetes tools (kubelet, kubeadm, kubectl, helm)
+- name: Remove Kubernetes package locks (so upgrade can install new version)
+  command: zypper removelock kubelet kubeadm kubectl helm
+  changed_when: false
+  failed_when: false
+
+- name: Install Kubernetes tools (kubelet, kubeadm, kubectl, helm) at target version
   community.general.zypper:
     name:
-      - kubelet
-      - kubeadm
-      - kubectl
+      - "kubelet={{ kubernetes_version | default('1.31') }}"
+      - "kubeadm={{ kubernetes_version | default('1.31') }}"
+      - "kubectl={{ kubernetes_version | default('1.31') }}"
       - helm
     state: present
   register: k8s_tools_installed

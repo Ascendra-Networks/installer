@@ -1,0 +1,23 @@
+# Example inventory for Ascendra environment playbooks (k8s-cluster-deploy, tyr-deploy, dashboard-deploy).
+# Copy to inventory/hosts and replace with your hostnames or IPs.
+#
+#   cp inventory/hosts.example inventory/hosts
+#   # Edit inventory/hosts with your nodes.
+#
+# Define hosts only under [masters] and/or [workers]. [all] is the union (do not list hosts under [all]).
+# - masters: control-plane nodes (kubeadm init).
+# - workers: nodes that join the cluster (kubeadm join).
+# Single-node: put the same host in both [masters] and [workers].
+
+[all:children]
+masters
+workers
+
+[masters]
+# Add at least one control-plane node. Example:
+master1 ansible_host=192.168.1.10
+
+[workers]
+# Add one or more nodes that will join the cluster. Example:
+worker1 ansible_host=192.168.1.20
+worker2 ansible_host=192.168.1.21

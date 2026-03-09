@@ -1,6 +1,6 @@
 {
   "version": "1.0.0",
-  "description": "Shared configuration defaults for Ascendra cluster deployment - used by both Terraform and UI",
+  "description": "Shared cluster defaults used by Terraform and the installer backend",
   "network": {
     "vpc": {
       "cidr": "10.0.0.0/16",
@@ -16,12 +16,12 @@
   },
   "compute": {
     "master": {
-      "instanceType": "t3.large",
+      "instanceType": "t3.xlarge",
       "diskSize": 100,
       "diskType": "gp3"
     },
     "worker": {
-      "defaultInstanceType": "t3.large",
+      "defaultInstanceType": "t3.xlarge",
       "diskSize": 100,
       "diskType": "gp3"
     }
@@ -34,5 +34,3 @@
     "managedBy": "Ascendra-Installer"
   }
 }
-
-

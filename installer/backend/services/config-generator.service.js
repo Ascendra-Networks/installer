@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import yaml from 'js-yaml';
+import defaultsService from './defaults.service.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -59,7 +60,7 @@ function generateTerraformVars(deployment) {
 cluster_name         = "${name}"
 aws_region           = "${awsRegion}"
 availability_zone    = "${availabilityZone}"
-master_instance_type = "t3.large"
+master_instance_type = "${defaultsService.defaults?.compute?.master?.instanceType || 't3.xlarge'}"
 ssh_public_key       = ""
 
 # Network Configuration
@@ -116,6 +117,36 @@ subnet_cidr = "10.0.1.0/24"
 }
 
 /**
+ * Build a sensible NO_PROXY value from the cluster's internal CIDRs.
+ * These addresses must never go through the proxy — if they do, control-plane
+ * components (kubelet → kube-apiserver, etc.) will fail to connect internally.
+ *
+ *   localhost / loopback
+ *   pod_network_cidr      (kubeadm --pod-network-cidr, default 10.10.0.0/16)
+ *   service_cidr          (kubeadm --service-cidr, default 10.96.0.0/12)
+ *   .svc / .cluster.local (in-cluster DNS suffixes)
+ *   All three RFC 1918 private ranges — covers node gateways on any typical
+ *   network (10.x.x.x for AWS, 172.16-31.x.x for some DCs, 192.168.x.x for
+ *   on-premise). Without 172.16.0.0/12 and 192.168.0.0/16 a gateway like
+ *   192.168.1.1 would be routed through the proxy and break cluster traffic.
+ */
+function buildDefaultNoProxy(allYmlContent) {
+  const parts = [
+    'localhost',
+    '127.0.0.1',
+    '169.254.169.254',               // AWS instance metadata
+    allYmlContent.pod_network_cidr  || '10.10.0.0/16',
+    allYmlContent.service_cidr      || '10.96.0.0/12',
+    '10.0.0.0/8',                    // AWS / on-prem 10.x.x.x nodes
+    '172.16.0.0/12',                 // on-prem 172.16-31.x.x nodes
+    '192.168.0.0/16',                // on-prem 192.168.x.x nodes & gateway
+    '.svc',
+    '.cluster.local',
+  ];
+  return parts.filter(Boolean).join(',');
+}
+
+/**
  * Update Ansible group_vars/all.yml with component selections
  */
 function generateAnsibleVars(deployment) {
@@ -123,7 +154,7 @@ function generateAnsibleVars(deployment) {
   
   // Read existing all.yml
   const projectRoot = path.resolve(__dirname, process.env.PROJECT_ROOT || '../../../');
-  const allYmlPath = path.join(projectRoot, 'ansible/group_vars/all.yml');
+  const allYmlPath = path.join(projectRoot, 'ansible/inventory/group_vars/all.yml');
   
   let allYmlContent = {};
   if (fs.existsSync(allYmlPath)) {
@@ -163,26 +194,51 @@ function generateAnsibleVars(deployment) {
     }
   }
 
+  // Add proxy configuration
+  const proxyConfig = deployment.clusterConfig?.proxyConfig || deployment.onPremiseConfig?.proxyConfig;
+  if (proxyConfig?.enabled) {
+    allYmlContent.proxy_enabled = true;
+    allYmlContent.HTTP_PROXY   = proxyConfig.HTTP_PROXY   || '';
+    allYmlContent.http_proxy   = proxyConfig.http_proxy   || '';
+    allYmlContent.HTTPS_PROXY  = proxyConfig.HTTPS_PROXY  || '';
+    allYmlContent.https_proxy  = proxyConfig.https_proxy  || '';
+
+    // If the user left NO_PROXY empty, build a safe default from the known
+    // internal CIDRs so cluster-internal traffic never goes through the proxy.
+    const userNoProxy = proxyConfig.NO_PROXY || proxyConfig.no_proxy || '';
+    const noProxy = userNoProxy || buildDefaultNoProxy(allYmlContent);
+    allYmlContent.NO_PROXY = noProxy;
+    allYmlContent.no_proxy = noProxy;
+  } else {
+    allYmlContent.proxy_enabled = false;
+    allYmlContent.HTTP_PROXY   = '';
+    allYmlContent.http_proxy   = '';
+    allYmlContent.HTTPS_PROXY  = '';
+    allYmlContent.https_proxy  = '';
+    allYmlContent.NO_PROXY     = '';
+    allYmlContent.no_proxy     = '';
+  }
+
   // Update Tyr configuration if backend-api is selected
   if (selectedComponents && selectedComponents['backend-api']) {
-    if (!allYmlContent.tyr_ghcr_username) {
-      allYmlContent.tyr_ghcr_username = process.env.TYR_GHCR_USERNAME || 'avivl777';
+    if (!allYmlContent.ghcr_username) {
+      allYmlContent.ghcr_username = process.env.GHCR_USERNAME || 'avivl777';
     }
-    if (!allYmlContent.tyr_ghcr_password) {
-      allYmlContent.tyr_ghcr_password = process.env.TYR_GHCR_PASSWORD || '';
+    if (!allYmlContent.ghcr_password) {
+      allYmlContent.ghcr_password = process.env.GHCR_PASSWORD || '';
     }
     if (!allYmlContent.tyr_version) {
-      allYmlContent.tyr_version = process.env.TYR_VERSION || '1.0.4';
+      allYmlContent.tyr_version = process.env.TYR_VERSION || '1.0.7';
     }
   }
 
   // Update Dashboard configuration if dashboard is selected
   if (selectedComponents && selectedComponents['dashboard']) {
-    if (!allYmlContent.tyr_ghcr_username) {
-      allYmlContent.tyr_ghcr_username = process.env.TYR_GHCR_USERNAME || 'avivl777';
+    if (!allYmlContent.ghcr_username) {
+      allYmlContent.ghcr_username = process.env.GHCR_USERNAME || 'avivl777';
     }
-    if (!allYmlContent.tyr_ghcr_password) {
-      allYmlContent.tyr_ghcr_password = process.env.TYR_GHCR_PASSWORD || '';
+    if (!allYmlContent.ghcr_password) {
+      allYmlContent.ghcr_password = process.env.GHCR_PASSWORD || '';
     }
     if (!allYmlContent.dashboard_version) {
       allYmlContent.dashboard_version = process.env.DASHBOARD_VERSION || '1.0.26';
@@ -197,7 +253,7 @@ function generateAnsibleVars(deployment) {
  */
 function writeTerraformVars(deployment, tfvarsContent) {
   const projectRoot = path.resolve(__dirname, process.env.PROJECT_ROOT || '../../../');
-  const envDir = path.join(projectRoot, process.env.TERRAFORM_ENV_DIR || 'terraform/environments/aws-dev');
+  const envDir = path.join(projectRoot, process.env.TERRAFORM_ENV_DIR || 'terraform/environments/aws');
   const tfvarsPath = path.join(envDir, `${deployment.clusterConfig.name}.tfvars`);
   
   // Ensure directory exists
@@ -212,42 +268,23 @@ function writeTerraformVars(deployment, tfvarsContent) {
 }
 
 /**
- * Write Ansible variables file to both group_vars locations
- * so Ansible finds them regardless of inventory/playbook resolution
+ * Write Ansible variables to ansible/inventory/group_vars/all.yml.
+ * Ansible resolves group_vars relative to the inventory file, so this is
+ * the single location both the installer (-i inventory/<name>.ini) and
+ * manual runs (-i inventory/hosts) will pick up.
  */
 function writeAnsibleVars(ansibleVarsContent) {
   const projectRoot = path.resolve(__dirname, process.env.PROJECT_ROOT || '../../../');
-  const allYmlPath = path.join(projectRoot, 'ansible/group_vars/all.yml');
   const inventoryGroupVarsDir = path.join(projectRoot, 'ansible/inventory/group_vars');
-  const inventoryAllYmlPath = path.join(inventoryGroupVarsDir, 'all.yml');
-  
-  // Backup existing file
-  if (fs.existsSync(allYmlPath)) {
-    const backupPath = `${allYmlPath}.backup-${Date.now()}`;
-    fs.copyFileSync(allYmlPath, backupPath);
-    console.log(`[ConfigGenerator] Backed up existing all.yml to: ${backupPath}`);
-  }
-  
-  fs.writeFileSync(allYmlPath, ansibleVarsContent);
-  console.log(`[ConfigGenerator] Written Ansible vars to: ${allYmlPath}`);
+  const allYmlPath = path.join(inventoryGroupVarsDir, 'all.yml');
 
-  // Also write to inventory/group_vars/ for directory-based inventory resolution
   if (!fs.existsSync(inventoryGroupVarsDir)) {
     fs.mkdirSync(inventoryGroupVarsDir, { recursive: true });
   }
-  fs.writeFileSync(inventoryAllYmlPath, ansibleVarsContent);
-  console.log(`[ConfigGenerator] Written Ansible vars to: ${inventoryAllYmlPath}`);
 
-  // Copy masters.yml and workers.yml into inventory group_vars too
-  const groupVarsDir = path.join(projectRoot, 'ansible/group_vars');
-  for (const groupFile of ['masters.yml', 'workers.yml']) {
-    const src = path.join(groupVarsDir, groupFile);
-    const dest = path.join(inventoryGroupVarsDir, groupFile);
-    if (fs.existsSync(src)) {
-      fs.copyFileSync(src, dest);
-    }
-  }
-  
+  fs.writeFileSync(allYmlPath, ansibleVarsContent);
+  console.log(`[ConfigGenerator] Written Ansible vars to: ${allYmlPath}`);
+
   return allYmlPath;
 }
 

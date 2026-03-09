@@ -61,12 +61,12 @@ class DefaultsService {
       },
       compute: {
         master: {
-          instanceType: 't3.large',
+          instanceType: 't3.xlarge',
           diskSize: 100,
           diskType: 'gp3'
         },
         worker: {
-          defaultInstanceType: 't3.large',
+          defaultInstanceType: 't3.xlarge',
           diskSize: 100,
           diskType: 'gp3'
         }

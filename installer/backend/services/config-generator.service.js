@@ -222,7 +222,7 @@ function generateAnsibleVars(deployment) {
   // Update Tyr configuration if backend-api is selected
   if (selectedComponents && selectedComponents['backend-api']) {
     if (!allYmlContent.ghcr_username) {
-      allYmlContent.ghcr_username = process.env.GHCR_USERNAME || 'avivl777';
+      allYmlContent.ghcr_username = process.env.GHCR_USERNAME || '';
     }
     if (!allYmlContent.ghcr_password) {
       allYmlContent.ghcr_password = process.env.GHCR_PASSWORD || '';
@@ -235,7 +235,7 @@ function generateAnsibleVars(deployment) {
   // Update Dashboard configuration if dashboard is selected
   if (selectedComponents && selectedComponents['dashboard']) {
     if (!allYmlContent.ghcr_username) {
-      allYmlContent.ghcr_username = process.env.GHCR_USERNAME || 'avivl777';
+      allYmlContent.ghcr_username = process.env.GHCR_USERNAME || '';
     }
     if (!allYmlContent.ghcr_password) {
       allYmlContent.ghcr_password = process.env.GHCR_PASSWORD || '';

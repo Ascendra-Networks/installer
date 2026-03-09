@@ -282,7 +282,7 @@ class AnsibleService {
 
     try {
       const extraVars = {
-        ghcr_username: process.env.GHCR_USERNAME || 'avivl777',
+        ghcr_username: process.env.GHCR_USERNAME || '',
         ghcr_password: process.env.GHCR_PASSWORD || '',
         tyr_version: process.env.TYR_VERSION || '1.0.7'
       };
@@ -319,7 +319,7 @@ class AnsibleService {
 
     try {
       const extraVars = {
-        ghcr_username: process.env.GHCR_USERNAME || 'avivl777',
+        ghcr_username: process.env.GHCR_USERNAME || '',
         ghcr_password: process.env.GHCR_PASSWORD || ''
       };
       const output = await this.executePlaybook('ascendra-environment/dashboard-deploy.yml', extraVars);

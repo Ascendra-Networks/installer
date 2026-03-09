@@ -12,9 +12,13 @@
 .terraform/
 *.tfplan
 crash.*.tfstate
+state/
 
 # Ansible
 *.retry
+*.backup-*
+ansible/inventory/*.ini
+ansible/inventory/hosts
 
 # IDE and OS
 .DS_Store

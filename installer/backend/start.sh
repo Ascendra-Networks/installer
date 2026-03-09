@@ -16,8 +16,8 @@ if [ ! -f .env ]; then
         echo "✓ Created .env file"
         echo ""
         echo "⚠️  Please edit .env and configure the following:"
-        echo "   - TYR_GHCR_USERNAME"
-        echo "   - TYR_GHCR_PASSWORD"
+        echo "   - GHCR_USERNAME"
+        echo "   - GHCR_PASSWORD"
         echo ""
         read -p "Press Enter to continue or Ctrl+C to exit and configure .env..."
     else

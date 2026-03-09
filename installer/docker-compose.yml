@@ -1,0 +1,28 @@
+services:
+  backend:
+    build: ../installer/backend
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ../ansible:/ansible
+      - ../terraform:/terraform
+      - ../config:/config:ro
+      - ~/.ssh:/root/.ssh:ro
+      - ~/.aws:/root/.aws:ro
+    environment:
+      PORT: 3001
+      FRONTEND_URL: http://localhost:5173
+    env_file:
+      - ../installer/backend/.env
+
+  frontend:
+    build:
+      context: ../installer/ui
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ../installer/ui:/app
+      - /app/node_modules
+    depends_on:
+      - backend
+

@@ -15,8 +15,8 @@ if not exist .env (
         echo Created .env file
         echo.
         echo WARNING: Please edit .env and configure:
-        echo    - TYR_GHCR_USERNAME
-        echo    - TYR_GHCR_PASSWORD
+        echo    - GHCR_USERNAME
+        echo    - GHCR_PASSWORD
         echo.
         pause
     ) else (

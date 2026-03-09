@@ -85,7 +85,7 @@ function ClusterSettingsWithMock({ mockData }: { mockData?: boolean }) {
 
 export const Default: Story = {
   decorators: [
-    (Story) => {
+    (_Story) => {
       const initialState = {
         cloudProvider: "aws" as const,
         clusterConfig: {
@@ -110,7 +110,7 @@ export const Default: Story = {
 
 export const WithPrefilledData: Story = {
   decorators: [
-    (Story) => {
+    (_Story) => {
       const initialState = {
         cloudProvider: "aws" as const,
         clusterConfig: {
@@ -135,7 +135,7 @@ export const WithPrefilledData: Story = {
 
 export const SearchDemo: Story = {
   decorators: [
-    (Story) => {
+    (_Story) => {
       const initialState = {
         cloudProvider: "aws" as const,
         clusterConfig: {

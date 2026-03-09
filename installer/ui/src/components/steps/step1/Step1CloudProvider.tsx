@@ -1,4 +1,4 @@
-import { Cloud, Server, Boxes, Building2 } from "lucide-react";
+import { Cloud, Server, Boxes } from "lucide-react";
 import { Card, CardContent } from "../../ui/card";
 import { Button } from "../../ui/button";
 import { useWizard } from "../../../contexts/WizardContext";

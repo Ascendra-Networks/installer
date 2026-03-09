@@ -28,7 +28,7 @@ const generateManyNodePools = (count: number): NodePool[] => {
       { id: `m-${i}-1`, machineType: "t3.medium", nodeCount: 2 },
       { id: `m-${i}-2`, machineType: "t3.large", nodeCount: 1 },
     ],
-    storageClass: "gp3",
+    storageClass: "standard" as const,
     storageSize: 100 + i * 10,
   }));
 };
@@ -143,7 +143,7 @@ function AWSCloudConfigWithMockData({ mockData }: { mockData?: boolean }) {
 
 export const Default: Story = {
   decorators: [
-    (Story) => {
+    (_Story) => {
       const customInitialState = {
         cloudProvider: "aws" as const,
         clusterConfig: {
@@ -168,7 +168,7 @@ export const Default: Story = {
 
 export const WithSearchDemo: Story = {
   decorators: [
-    (Story) => {
+    (_Story) => {
       const customInitialState = {
         cloudProvider: "aws" as const,
         clusterConfig: {
@@ -213,7 +213,7 @@ export const WithSearchDemo: Story = {
 
 export const WithManyNodePools: Story = {
   decorators: [
-    (Story) => {
+    (_Story) => {
       const customInitialState = {
         cloudProvider: "aws" as const,
         clusterConfig: {
@@ -238,7 +238,7 @@ export const WithManyNodePools: Story = {
 
 export const PreConfigured: Story = {
   decorators: [
-    (Story) => {
+    (_Story) => {
       const customInitialState = {
         cloudProvider: "aws" as const,
         clusterConfig: {

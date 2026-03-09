@@ -86,16 +86,6 @@ export const Interactive: Story = {
   render: () => <InteractiveNodeGroupDialog />,
 };
 
-// ControlPlaneDialog stories
-const controlPlaneMeta: Meta<typeof ControlPlaneDialog> = {
-  title: "Steps/Step2/OnPremiseConfiguration/ControlPlaneDialog",
-  component: ControlPlaneDialog,
-  tags: ["autodocs"],
-  parameters: {
-    layout: "centered",
-  },
-};
-
 export const ControlPlaneEmpty: Story = {
   render: () => {
     const [open, setOpen] = useState(true);

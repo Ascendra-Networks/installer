@@ -3,12 +3,7 @@ import { Plus, Trash2 } from "lucide-react";
 import { Button } from "../../../ui/button";
 import { Input } from "../../../ui/input";
 import { Label } from "../../../ui/label";
-import {
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "../../../ui/select";
+import { SelectItem } from "../../../ui/select";
 import { SearchableSelect } from "../../../shared/form";
 import { EnvVariablesEditor } from "../../../shared/EnvVariablesEditor";
 import {
@@ -88,10 +83,6 @@ export function NodePoolDialog({
         envVars: [],
       });
     }
-  };
-
-  const getTotalNodes = () => {
-    return pool.machines.reduce((sum, m) => sum + m.nodeCount, 0);
   };
 
   const isValid = pool.name.trim() !== "" && pool.machines.length > 0 && 

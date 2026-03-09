@@ -196,26 +196,32 @@ export function SearchableSelect({
   const filteredChildren = React.useMemo(() => {
     if (!searchTerm || !children) return children;
 
+    type ItemProps = { value?: unknown; children?: React.ReactNode };
+
     return React.Children.toArray(children).filter((child) => {
       if (!React.isValidElement(child)) return true;
 
+      const props = child.props as ItemProps;
+
       // Handle SelectItem
-      if (child.props?.value) {
-        const value = String(child.props.value).toLowerCase();
-        const childText = getChildText(child).toLowerCase();
+      if (props.value) {
+        const value = String(props.value).toLowerCase();
+        const childText = getChildText(child as React.ReactElement<ItemProps>).toLowerCase();
         const search = searchTerm.toLowerCase();
 
         return value.includes(search) || childText.includes(search);
       }
 
       // Handle SelectGroup - filter its children recursively
-      if (child.props?.children) {
-        const groupChildren = React.Children.toArray(child.props.children);
+      if (props.children) {
+        const groupChildren = React.Children.toArray(props.children);
         const filteredGroupChildren = groupChildren.filter((groupChild) => {
-          if (!React.isValidElement(groupChild) || !groupChild.props?.value) return true;
+          if (!React.isValidElement(groupChild)) return true;
+          const groupProps = groupChild.props as ItemProps;
+          if (!groupProps.value) return true;
 
-          const value = String(groupChild.props.value).toLowerCase();
-          const childText = getChildText(groupChild).toLowerCase();
+          const value = String(groupProps.value).toLowerCase();
+          const childText = getChildText(groupChild as React.ReactElement<ItemProps>).toLowerCase();
           const search = searchTerm.toLowerCase();
 
           return value.includes(search) || childText.includes(search);
@@ -223,8 +229,7 @@ export function SearchableSelect({
 
         if (filteredGroupChildren.length === 0) return false;
 
-        return React.cloneElement(child, {
-          ...child.props,
+        return React.cloneElement(child as React.ReactElement<ItemProps>, {
           children: filteredGroupChildren,
         });
       }
@@ -277,20 +282,23 @@ export function SearchableSelect({
 }
 
 // Helper function to extract text content from React elements
-function getChildText(child: React.ReactElement): string {
-  if (typeof child.props.children === "string") {
-    return child.props.children;
+function getChildText(child: React.ReactElement<{ children?: React.ReactNode }>): string {
+  const { children } = child.props;
+
+  if (typeof children === "string") {
+    return children;
   }
 
-  if (React.isValidElement(child.props.children)) {
-    return getChildText(child.props.children);
+  if (React.isValidElement(children)) {
+    return getChildText(children as React.ReactElement<{ children?: React.ReactNode }>);
   }
 
-  if (Array.isArray(child.props.children)) {
-    return child.props.children
-      .map((c: any) => {
+  if (Array.isArray(children)) {
+    return (children as unknown[])
+      .map((c) => {
         if (typeof c === "string") return c;
-        if (React.isValidElement(c)) return getChildText(c);
+        if (React.isValidElement(c))
+          return getChildText(c as React.ReactElement<{ children?: React.ReactNode }>);
         return "";
       })
       .join(" ");

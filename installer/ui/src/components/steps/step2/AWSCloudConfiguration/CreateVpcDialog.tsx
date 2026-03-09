@@ -44,7 +44,7 @@ export function CreateVpcDialog({
   open,
   onOpenChange,
   region,
-  cloudProvider,
+  cloudProvider: _cloudProvider,
   clusterName = "",
   onVpcCreated,
 }: CreateVpcDialogProps) {

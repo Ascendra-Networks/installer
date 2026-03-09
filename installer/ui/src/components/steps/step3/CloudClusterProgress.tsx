@@ -29,8 +29,6 @@ const INFRA_PHASES = [
   { id: "finalize", label: "Finalize", steps: ["outputs", "complete", "generating-inventory", "checking-ssh", "ssh-ready"] },
 ] as const;
 
-type InfraPhaseId = (typeof INFRA_PHASES)[number]["id"];
-
 function getInfraPhaseIndex(step: string): number {
   return INFRA_PHASES.findIndex((p) => (p.steps as readonly string[]).includes(step));
 }
@@ -84,7 +82,7 @@ function getSubStepPhaseMessage(
 function getSubStepTaskDetail(
   subStep: DeploymentSubStep,
   step: string,
-  playbook: string,
+  _playbook: string,
   globalMessage: string
 ): string | null {
   if (subStep.status !== "running" && subStep.status !== "retrying") {

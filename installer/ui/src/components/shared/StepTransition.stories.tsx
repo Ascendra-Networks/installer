@@ -45,7 +45,7 @@ function InteractiveTransition() {
   return (
     <div className="space-y-6">
       <div className="flex gap-2">
-        {steps.map((s, i) => (
+        {steps.map((_, i) => (
           <Button
             key={i}
             variant={step === i + 1 ? "default" : "outline"}

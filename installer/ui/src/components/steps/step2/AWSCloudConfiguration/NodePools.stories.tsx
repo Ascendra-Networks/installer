@@ -19,7 +19,7 @@ const samplePools: NodePool[] = [
       { id: "m1", machineType: "t3.medium", nodeCount: 3 },
       { id: "m2", machineType: "t3.large", nodeCount: 2 },
     ],
-    storageClass: "gp3",
+    storageClass: "standard",
     storageSize: 100,
   },
   {
@@ -122,7 +122,7 @@ const manyPools = Array.from({ length: 10 }, (_, i) => ({
     { id: `m-${i}-1`, machineType: "t3.medium", nodeCount: 2 },
     { id: `m-${i}-2`, machineType: "t3.large", nodeCount: 1 },
   ],
-  storageClass: i % 3 === 0 ? "gp3" : i % 3 === 1 ? "fast-ssd" : "balanced",
+  storageClass: i % 3 === 0 ? "standard" : i % 3 === 1 ? "fast-ssd" : "balanced",
   storageSize: 100 + i * 10,
 })) as NodePool[];
 

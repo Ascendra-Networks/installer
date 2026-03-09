@@ -38,6 +38,19 @@ export interface NodePool {
   envVars?: EnvVariable[];
 }
 
+export type ProxyMode = 'grouped' | 'protocol' | 'granular';
+
+export interface ProxyConfig {
+  enabled: boolean;
+  mode: ProxyMode;
+  HTTP_PROXY: string;
+  http_proxy: string;
+  HTTPS_PROXY: string;
+  https_proxy: string;
+  NO_PROXY: string;
+  no_proxy: string;
+}
+
 export interface ClusterConfig {
   name: string;
   region: string;
@@ -45,6 +58,7 @@ export interface ClusterConfig {
   subnet: string;
   nodePools: NodePool[];
   envVars?: EnvVariable[];
+  proxyConfig?: ProxyConfig;
 }
 
 export interface Component {
@@ -86,6 +100,7 @@ export interface WizardState {
   deploymentSubSteps: DeploymentSubStep[];
   installationProgress: InstallationProgress[];
   dashboardUrl: string | null;
+  masterIp: string | null;
   isComplete: boolean;
 }
 
@@ -110,6 +125,8 @@ export interface ProviderOption {
   name: string;
   description: string;
   icon: string;
+  /** When false, provider is shown but not selectable (e.g. "Coming Soon") */
+  available?: boolean;
 }
 
 export interface RegionOption {
@@ -173,6 +190,7 @@ export interface OnPremiseConfig {
   controlPlane: OnPremiseControlPlane;
   workerNodes: OnPremiseNodeGroup[];
   envVars?: EnvVariable[];
+  proxyConfig?: ProxyConfig;
 }
 
 export interface OnPremiseValidationResult {

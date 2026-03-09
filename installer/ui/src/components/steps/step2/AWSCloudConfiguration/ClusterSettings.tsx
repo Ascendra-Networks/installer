@@ -4,7 +4,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "../../../ui/card";
 import { Button } from "../../../ui/button";
 import { FormField, SearchableSelectField } from "../../../shared/form";
 import { LoadingIndicator } from "../../../shared/loading/LoadingIndicator";
-import { installerService } from "../../../../services/installer.service";
+import { awsService } from "../../../../services/aws.service";
 import { validateClusterName } from "../../../../utils/validators";
 import { useWizard } from "../../../../contexts/WizardContext";
 import { RegionOption } from "../../../../types";
@@ -37,7 +37,7 @@ export function ClusterSettings() {
   useEffect(() => {
     if (state.cloudProvider) {
       setLoadingRegions(true);
-      installerService.getRegions(state.cloudProvider)
+      awsService.getRegions()
         .then(setRegions)
         .catch((err) => {
           console.error('Failed to fetch regions:', err);
@@ -53,7 +53,7 @@ export function ClusterSettings() {
 
     if (state.cloudProvider && state.clusterConfig.region) {
       setLoadingVpcs(true);
-      installerService.getVPCs(state.cloudProvider, state.clusterConfig.region)
+      awsService.getVPCs(state.clusterConfig.region)
         .then((data) => {
           setVpcs(data);
           console.log(`Loaded ${data.length} VPCs for region ${state.clusterConfig.region}`);
@@ -72,11 +72,7 @@ export function ClusterSettings() {
 
     if (state.cloudProvider && state.clusterConfig.region) {
       setLoadingSubnets(true);
-      installerService.getSubnets(
-        state.cloudProvider,
-        state.clusterConfig.region,
-        state.clusterConfig.vpc
-      )
+      awsService.getSubnets(state.clusterConfig.region, state.clusterConfig.vpc)
         .then((data) => {
           setSubnets(data);
           console.log(`Loaded ${data.length} subnets for region ${state.clusterConfig.region}`);
@@ -98,7 +94,7 @@ export function ClusterSettings() {
   const handleVpcCreated = (vpcId: string) => {
     if (state.cloudProvider && state.clusterConfig.region) {
       setLoadingVpcs(true);
-      installerService.getVPCs(state.cloudProvider, state.clusterConfig.region)
+      awsService.getVPCs(state.clusterConfig.region)
         .then((data) => {
           setVpcs(data);
           setClusterConfig({ vpc: vpcId, subnet: '' });
@@ -110,11 +106,7 @@ export function ClusterSettings() {
   const handleSubnetCreated = (subnetId: string) => {
     if (state.cloudProvider && state.clusterConfig.region) {
       setLoadingSubnets(true);
-      installerService.getSubnets(
-        state.cloudProvider,
-        state.clusterConfig.region,
-        state.clusterConfig.vpc
-      )
+      awsService.getSubnets(state.clusterConfig.region, state.clusterConfig.vpc)
         .then((data) => {
           setSubnets(data);
           setClusterConfig({ subnet: subnetId });

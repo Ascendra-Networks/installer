@@ -2,7 +2,7 @@ import { useState, useEffect } from "react";
 import { Button } from "../../../ui/button";
 import { Card, CardContent } from "../../../ui/card";
 import { useWizard } from "../../../../contexts/WizardContext";
-import { installerService } from "../../../../services/installer.service";
+import { awsService } from "../../../../services/aws.service";
 import { isClusterConfigValid } from "../../../../utils/validators";
 import { NodePool, MachineTypeOption, EnvVariable } from "../../../../types";
 import { EnvVariablesEditor } from "../../../shared/EnvVariablesEditor";
@@ -32,8 +32,8 @@ export function AWSCloudConfiguration() {
 
     if (state.cloudProvider && state.clusterConfig.region) {
       setLoadingMachineTypes(true);
-      installerService
-        .getMachineTypes(state.cloudProvider, state.clusterConfig.region)
+      awsService
+        .getMachineTypes(state.clusterConfig.region)
         .then((data) => {
           setMachineTypes(data);
           console.log(

@@ -6,7 +6,7 @@ import { Checkbox } from "../../ui/checkbox";
 import { Label } from "../../ui/label";
 import { Separator } from "../../ui/separator";
 import { useWizard } from "../../../contexts/WizardContext";
-import { installerService, AVAILABLE_COMPONENTS } from "../../../services/installer.service";
+import { AVAILABLE_COMPONENTS } from "../../../services/components";
 import { Component, ComponentSelection as ComponentSelectionState } from "../../../types";
 import { cn } from "../../ui/utils";
 

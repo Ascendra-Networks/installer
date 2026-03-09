@@ -12,7 +12,8 @@ import { Button } from "../../ui/button";
 import { Progress } from "../../ui/progress";
 import { Separator } from "../../ui/separator";
 import { useWizard } from "../../../contexts/WizardContext";
-import { installerService, AVAILABLE_COMPONENTS } from "../../../services/installer.service";
+import { AVAILABLE_COMPONENTS } from "../../../services/components";
+import { deploymentService } from "../../../services/deployment.service";
 import { cn } from "../../ui/utils";
 
 export function InstallProgress() {
@@ -35,12 +36,12 @@ export function InstallProgress() {
   useEffect(() => {
     if (state.isComplete) {
       setAccessUrls(
-        installerService.getAccessUrls(state.clusterConfig.name)
+        deploymentService.getAccessUrls(state.clusterConfig.name, state.masterIp)
       );
       // Start countdown after installation completes
       setRedirectCountdown(5);
     }
-  }, [state.isComplete, state.clusterConfig.name]);
+  }, [state.isComplete, state.clusterConfig.name, state.masterIp]);
 
   // Countdown timer
   useEffect(() => {
@@ -58,13 +59,17 @@ export function InstallProgress() {
     if (redirectCountdown === 0) {
       // Trigger fade out event for parent App component
       window.dispatchEvent(new Event('installer-fade-out'));
-      
+
+      const redirectUrl = state.masterIp
+        ? `http://${state.masterIp}/?from=installer`
+        : "/?from=installer";
+
       // Redirect after fade animation
       setTimeout(() => {
-        window.location.href = "/?from=installer";
+        window.location.href = redirectUrl;
       }, 800); // 0.8s fade duration
     }
-  }, [redirectCountdown]);
+  }, [redirectCountdown, state.masterIp]);
 
   const isComplete = state.isComplete;
   const totalProgress =
@@ -103,8 +108,11 @@ users:
 
   const handleRedirectNow = () => {
     window.dispatchEvent(new Event('installer-fade-out'));
+    const redirectUrl = state.masterIp
+      ? `http://${state.masterIp}/?from=installer`
+      : "/?from=installer";
     setTimeout(() => {
-      window.location.href = "/?from=installer";
+      window.location.href = redirectUrl;
     }, 800);
   };
 

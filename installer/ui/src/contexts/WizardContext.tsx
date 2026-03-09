@@ -10,7 +10,9 @@ import {
   DeploymentSubStepId,
   DeploymentSubStep,
 } from "../types";
-import { installerService, initializeWebSocket, getSocket, closeWebSocket } from "../services/installer.service";
+import { wizardStateService } from "../services/wizard-state.service";
+import { deploymentService } from "../services/deployment.service";
+import { initializeWebSocket, getSocket, closeWebSocket } from "../services/websocket.service";
 
 function buildInitialSubSteps(isOnPremise: boolean): DeploymentSubStep[] {
   const steps: DeploymentSubStep[] = [];
@@ -43,6 +45,7 @@ const initialState: WizardState = {
   deploymentSubSteps: [],
   installationProgress: [],
   dashboardUrl: null,
+  masterIp: null,
   isComplete: false,
 };
 
@@ -68,14 +71,17 @@ export function WizardProvider({
     let cancelled = false;
     (async () => {
       try {
-        const saved = await installerService.getWizardState();
-        if (!cancelled && saved && saved.currentStep) {
+        const saved = await wizardStateService.get();
+        if (!cancelled && saved && saved.currentStep && !saved.isComplete) {
           const { savedAt, deploymentId: savedDeploymentId, ...wizardFields } = saved;
           setState((prev) => ({ ...prev, ...wizardFields }));
-          if (savedDeploymentId) {
+          if (typeof savedDeploymentId === "string") {
             setDeploymentId(savedDeploymentId);
           }
           console.log('[WizardContext] Restored wizard state from backend (saved at', savedAt, ')');
+        } else if (!cancelled && saved?.isComplete) {
+          console.log('[WizardContext] Previous session was completed, starting fresh');
+          wizardStateService.clear().catch(() => {});
         }
       } catch (err) {
         console.warn('[WizardContext] Could not restore wizard state:', err);
@@ -111,11 +117,12 @@ export function WizardProvider({
         deploymentSubSteps: state.deploymentSubSteps,
         installationProgress: state.installationProgress,
         dashboardUrl: state.dashboardUrl,
+        masterIp: state.masterIp,
         isComplete: state.isComplete,
         deploymentId,
       };
 
-      installerService.saveWizardState(payload).catch((err) => {
+      wizardStateService.save(payload).catch((err) => {
         console.warn('[WizardContext] Failed to persist wizard state:', err);
       });
     }, SAVE_DEBOUNCE_MS);
@@ -126,7 +133,7 @@ export function WizardProvider({
   }, [state, deploymentId]);
 
   useEffect(() => {
-    const socket = initializeWebSocket();
+    initializeWebSocket();
     return () => {
       closeWebSocket();
     };
@@ -184,6 +191,7 @@ export function WizardProvider({
         clusterCreationStatus: 'completed',
         clusterCreationProgress: 100,
         clusterCreationMessage: 'Deployment completed successfully',
+        masterIp: data.masterIp || prev.masterIp,
         deploymentSubSteps: prev.deploymentSubSteps.map((s) => ({
           ...s,
           status: s.status === 'pending' ? 'completed' : s.status,
@@ -332,7 +340,7 @@ export function WizardProvider({
     }));
 
     try {
-      const deployment = await installerService.createDeployment({
+      const deployment = await deploymentService.create({
         cloudProvider: state.cloudProvider!,
         clusterConfig: state.clusterConfig,
         onPremiseConfig: state.onPremiseConfig,
@@ -427,7 +435,7 @@ export function WizardProvider({
   const resetWizard = useCallback(() => {
     setState(initialState);
     setDeploymentId(null);
-    installerService.clearWizardState().catch(() => {});
+    wizardStateService.clear().catch(() => {});
   }, []);
 
   const value: WizardContextType = {

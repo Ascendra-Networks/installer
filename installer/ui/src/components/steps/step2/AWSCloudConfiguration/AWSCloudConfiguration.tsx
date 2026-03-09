@@ -1,15 +1,18 @@
 import { useState, useEffect } from "react";
+import { Shield } from "lucide-react";
 import { Button } from "../../../ui/button";
 import { Card, CardContent } from "../../../ui/card";
 import { useWizard } from "../../../../contexts/WizardContext";
-import { installerService } from "../../../../services/installer.service";
+import { awsService } from "../../../../services/aws.service";
 import { isClusterConfigValid } from "../../../../utils/validators";
-import { NodePool, MachineTypeOption, EnvVariable } from "../../../../types";
+import { NodePool, MachineTypeOption, EnvVariable, ProxyConfig } from "../../../../types";
 import { EnvVariablesEditor } from "../../../shared/EnvVariablesEditor";
 import { ClusterSettings } from "./ClusterSettings";
 import { NodePools } from "./NodePools";
 import { ConfigurationSummary } from "./ConfigurationSummary";
 import { NodePoolDialog } from "./NodePoolDialog";
+import { ProxyConfigDialog } from "./ProxyConfigDialog";
+import { wizardStateService } from "../../../../services/wizard-state.service";
 
 /**
  * AWSCloudConfiguration Component
@@ -21,6 +24,7 @@ export function AWSCloudConfiguration() {
   const { state, setClusterConfig, nextStep, previousStep } = useWizard();
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editingPool, setEditingPool] = useState<NodePool | undefined>();
+  const [proxyDialogOpen, setProxyDialogOpen] = useState(false);
 
   // Machine types for node pool dialog
   const [machineTypes, setMachineTypes] = useState<MachineTypeOption[]>([]);
@@ -32,8 +36,8 @@ export function AWSCloudConfiguration() {
 
     if (state.cloudProvider && state.clusterConfig.region) {
       setLoadingMachineTypes(true);
-      installerService
-        .getMachineTypes(state.cloudProvider, state.clusterConfig.region)
+      awsService
+        .getMachineTypes(state.clusterConfig.region)
         .then((data) => {
           setMachineTypes(data);
           console.log(
@@ -80,6 +84,17 @@ export function AWSCloudConfiguration() {
     });
   };
 
+  const handleSaveProxy = (proxyConfig: ProxyConfig) => {
+    setClusterConfig({ proxyConfig });
+    wizardStateService.applyAnsibleConfig({
+      cloudProvider: state.cloudProvider,
+      clusterConfig: { ...state.clusterConfig, proxyConfig },
+      selectedComponents: state.selectedComponents,
+    }).catch(console.error);
+  };
+
+  const proxy = state.clusterConfig.proxyConfig;
+
   const handleContinue = () => {
     if (isClusterConfigValid(state.clusterConfig)) {
       nextStep();
@@ -122,6 +137,59 @@ export function AWSCloudConfiguration() {
         </CardContent>
       </Card>
 
+      {/* Proxy Configuration */}
+      <Card className="border-zinc-800 bg-zinc-900">
+        <CardContent className="pt-6">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <div
+                className={`flex size-9 items-center justify-center rounded-lg ${
+                  proxy?.enabled
+                    ? "bg-gradient-to-br from-violet-500 to-violet-600 shadow-lg shadow-violet-500/20"
+                    : "bg-zinc-800 border border-zinc-700"
+                }`}
+              >
+                <Shield
+                  className={`size-4 ${proxy?.enabled ? "text-white" : "text-zinc-500"}`}
+                />
+              </div>
+              <div>
+                <p className="text-sm font-medium text-zinc-200">Proxy Configuration</p>
+                {proxy?.enabled ? (
+                  <p className="text-xs text-zinc-400 mt-0.5">
+                    <span className="text-violet-400 font-medium">Enabled</span>
+                    {" · "}
+                    <span className="capitalize">
+                      {proxy.mode === "grouped"
+                        ? "Grouped"
+                        : proxy.mode === "protocol"
+                        ? "Per Protocol"
+                        : "Granular"}
+                    </span>
+                    {proxy.HTTP_PROXY && (
+                      <>
+                        {" · "}
+                        <span className="font-mono text-zinc-300">{proxy.HTTP_PROXY}</span>
+                      </>
+                    )}
+                  </p>
+                ) : (
+                  <p className="text-xs text-zinc-500 mt-0.5">No proxy configured</p>
+                )}
+              </div>
+            </div>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setProxyDialogOpen(true)}
+              className="border-zinc-700 hover:bg-zinc-800 hover:border-violet-500/50 hover:text-violet-300 transition-colors"
+            >
+              {proxy?.enabled ? "Edit Proxy" : "Configure Proxy"}
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
+
       {/* Configuration Summary */}
       <ConfigurationSummary
         nodePools={state.clusterConfig.nodePools}
@@ -151,6 +219,14 @@ export function AWSCloudConfiguration() {
         onSave={handleSavePool}
         machineTypes={machineTypes}
         editPool={editingPool}
+      />
+
+      {/* Proxy Config Dialog */}
+      <ProxyConfigDialog
+        open={proxyDialogOpen}
+        onOpenChange={setProxyDialogOpen}
+        proxyConfig={state.clusterConfig.proxyConfig}
+        onSave={handleSaveProxy}
       />
     </div>
   );

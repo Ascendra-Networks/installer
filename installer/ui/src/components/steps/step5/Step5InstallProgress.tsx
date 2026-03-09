@@ -13,7 +13,7 @@ import { Button } from "../../ui/button";
 import { Progress } from "../../ui/progress";
 import { Separator } from "../../ui/separator";
 import { useWizard } from "../../../contexts/WizardContext";
-import { AVAILABLE_COMPONENTS } from "../../../services/installer.service";
+import { AVAILABLE_COMPONENTS } from "../../../services/components";
 import { cn } from "../../ui/utils";
 
 export function InstallProgress() {

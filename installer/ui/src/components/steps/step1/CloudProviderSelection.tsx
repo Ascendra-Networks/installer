@@ -1,48 +1,19 @@
-import { Cloud, Server, Boxes, Building2 } from "lucide-react";
+import { Cloud, Server, Boxes, type LucideIcon } from "lucide-react";
 import { Card, CardContent } from "../../ui/card";
 import { Button } from "../../ui/button";
 import { useWizard } from "../../../contexts/WizardContext";
 import { CloudProvider } from "../../../types";
+import { CLOUD_PROVIDERS } from "../../../services/providers";
 import { cn } from "../../ui/utils";
 
-const PROVIDER_ICONS = {
+const PROVIDER_ICONS: Record<string, LucideIcon> = {
   aws: Cloud,
   azure: Boxes,
   gcp: Cloud,
+  server: Server,
   "on-premise": Server,
-  "onpremise": Server,
+  onpremise: Server,
 };
-
-const PROVIDERS = [
-  {
-    id: "aws" as CloudProvider,
-    name: "Amazon Web Services",
-    description: "Deploy on AWS cloud infrastructure",
-    color: "orange",
-    available: true,
-  },
-  {
-    id: "azure" as CloudProvider,
-    name: "Microsoft Azure",
-    description: "Deploy on Azure cloud platform",
-    color: "blue",
-    available: false,
-  },
-  {
-    id: "gcp" as CloudProvider,
-    name: "Google Cloud Platform",
-    description: "Deploy on Google Cloud infrastructure",
-    color: "red",
-    available: false,
-  },
-  {
-    id: "on-premise" as CloudProvider,
-    name: "On-Premise",
-    description: "Deploy on your existing physical infrastructure",
-    color: "purple",
-    available: true,
-  },
-];
 
 export function CloudProviderSelection() {
   const { state, setCloudProvider, nextStep } = useWizard();
@@ -68,10 +39,10 @@ export function CloudProviderSelection() {
       </div>
 
       <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
-        {PROVIDERS.map((provider) => {
-          const Icon = PROVIDER_ICONS[provider.id];
+        {CLOUD_PROVIDERS.map((provider) => {
+          const Icon = PROVIDER_ICONS[provider.icon] ?? Cloud;
           const isSelected = state.cloudProvider === provider.id;
-          const isAvailable = provider.available;
+          const isAvailable = provider.available !== false;
 
           return (
             <Card

@@ -2,7 +2,7 @@ import type { Meta, StoryObj } from "@storybook/react";
 import { useEffect } from "react";
 import { ClusterSettings } from "./ClusterSettings";
 import { WizardProvider } from "../../../../contexts/WizardContext";
-import { installerService } from "../../../../services/installer.service";
+import { awsService } from "../../../../services/aws.service";
 
 const meta: Meta<typeof ClusterSettings> = {
   title: "Steps/Step2/AWSCloudConfiguration/ClusterSettings",
@@ -54,29 +54,29 @@ function ClusterSettingsWithMock({ mockData }: { mockData?: boolean }) {
   useEffect(() => {
     if (!mockData) return;
 
-    const originalGetRegions = installerService.getRegions.bind(installerService);
-    const originalGetVPCs = installerService.getVPCs.bind(installerService);
-    const originalGetSubnets = installerService.getSubnets.bind(installerService);
+    const originalGetRegions = awsService.getRegions.bind(awsService);
+    const originalGetVPCs = awsService.getVPCs.bind(awsService);
+    const originalGetSubnets = awsService.getSubnets.bind(awsService);
 
-    installerService.getRegions = async () => {
+    awsService.getRegions = async () => {
       await new Promise((resolve) => setTimeout(resolve, 300));
       return generateMockRegions();
     };
 
-    installerService.getVPCs = async () => {
+    awsService.getVPCs = async () => {
       await new Promise((resolve) => setTimeout(resolve, 300));
       return generateMockVPCs();
     };
 
-    installerService.getSubnets = async () => {
+    awsService.getSubnets = async () => {
       await new Promise((resolve) => setTimeout(resolve, 300));
       return generateMockSubnets();
     };
 
     return () => {
-      installerService.getRegions = originalGetRegions;
-      installerService.getVPCs = originalGetVPCs;
-      installerService.getSubnets = originalGetSubnets;
+      awsService.getRegions = originalGetRegions;
+      awsService.getVPCs = originalGetVPCs;
+      awsService.getSubnets = originalGetSubnets;
     };
   }, [mockData]);
 

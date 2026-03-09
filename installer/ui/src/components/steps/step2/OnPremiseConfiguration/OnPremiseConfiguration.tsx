@@ -7,16 +7,19 @@ import { Alert, AlertDescription } from '../../../ui/alert';
 import { NodeGroupDialog, ControlPlaneDialog } from './NodeGroupDialog';
 import { NodeCustomizeDialog } from './NodeCustomizeDialog';
 import { EnvVariablesEditor } from '../../../shared/EnvVariablesEditor';
+import { ProxyConfigDialog } from '../AWSCloudConfiguration/ProxyConfigDialog';
 import { useWizard } from '../../../../contexts/WizardContext';
+import { wizardStateService } from '../../../../services/wizard-state.service';
 import { 
   OnPremiseConfig, 
   OnPremiseNode, 
   OnPremiseNodeGroup,
   OnPremiseValidationResult,
   SSHValidationResult,
-  EnvVariable
+  EnvVariable,
+  ProxyConfig
 } from '../../../../types';
-import { Download, Upload, Plus, Trash2, CheckCircle, XCircle, Loader2, Edit2, Server, Settings } from 'lucide-react';
+import { Download, Upload, Plus, Trash2, CheckCircle, XCircle, Loader2, Edit2, Server, Settings, Shield } from 'lucide-react';
 
 interface OnPremiseConfigurationProps {
   onConfigChange: (config: OnPremiseConfig) => void;
@@ -33,7 +36,7 @@ export const OnPremiseConfiguration: React.FC<OnPremiseConfigurationProps> = ({
   onConfigChange, 
   initialConfig 
 }) => {
-  const { nextStep, previousStep } = useWizard();
+  const { state, nextStep, previousStep } = useWizard();
 
   const [config, setConfig] = useState<OnPremiseConfig>(initialConfig || {
     clusterName: '',
@@ -56,6 +59,16 @@ export const OnPremiseConfiguration: React.FC<OnPremiseConfigurationProps> = ({
   const [customizingControlPlaneIndex, setCustomizingControlPlaneIndex] = useState<number | null>(null);
   const [workerGroupDialogOpen, setWorkerGroupDialogOpen] = useState(false);
   const [editingGroupIndex, setEditingGroupIndex] = useState<number | null>(null);
+  const [proxyDialogOpen, setProxyDialogOpen] = useState(false);
+
+  const handleSaveProxy = (proxyConfig: ProxyConfig) => {
+    updateConfig({ ...config, proxyConfig });
+    wizardStateService.applyAnsibleConfig({
+      cloudProvider: state.cloudProvider,
+      onPremiseConfig: { ...config, proxyConfig },
+      selectedComponents: state.selectedComponents,
+    }).catch(console.error);
+  };
 
   const canContinue = Boolean(
     config.clusterName &&
@@ -613,6 +626,59 @@ export const OnPremiseConfiguration: React.FC<OnPremiseConfigurationProps> = ({
         </Card>
       )}
 
+      {/* Proxy Configuration */}
+      <Card className="border-zinc-800 bg-zinc-900">
+        <CardContent className="pt-6">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <div
+                className={`flex size-9 items-center justify-center rounded-lg ${
+                  config.proxyConfig?.enabled
+                    ? "bg-gradient-to-br from-violet-500 to-violet-600 shadow-lg shadow-violet-500/20"
+                    : "bg-zinc-800 border border-zinc-700"
+                }`}
+              >
+                <Shield
+                  className={`size-4 ${config.proxyConfig?.enabled ? "text-white" : "text-zinc-500"}`}
+                />
+              </div>
+              <div>
+                <p className="text-sm font-medium text-zinc-200">Proxy Configuration</p>
+                {config.proxyConfig?.enabled ? (
+                  <p className="text-xs text-zinc-400 mt-0.5">
+                    <span className="text-violet-400 font-medium">Enabled</span>
+                    {" · "}
+                    <span className="capitalize">
+                      {config.proxyConfig.mode === "grouped"
+                        ? "Grouped"
+                        : config.proxyConfig.mode === "protocol"
+                        ? "Per Protocol"
+                        : "Granular"}
+                    </span>
+                    {config.proxyConfig.HTTP_PROXY && (
+                      <>
+                        {" · "}
+                        <span className="font-mono text-zinc-300">{config.proxyConfig.HTTP_PROXY}</span>
+                      </>
+                    )}
+                  </p>
+                ) : (
+                  <p className="text-xs text-zinc-500 mt-0.5">No proxy configured</p>
+                )}
+              </div>
+            </div>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setProxyDialogOpen(true)}
+              className="border-zinc-700 hover:bg-zinc-800 hover:border-violet-500/50 hover:text-violet-300 transition-colors"
+            >
+              {config.proxyConfig?.enabled ? "Edit Proxy" : "Configure Proxy"}
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
+
       {/* Validation & Testing */}
       <Card className="border-zinc-800 bg-zinc-900">
         <CardHeader>
@@ -731,6 +797,13 @@ export const OnPremiseConfiguration: React.FC<OnPremiseConfigurationProps> = ({
         onOpenChange={setWorkerGroupDialogOpen}
         group={editingGroupIndex !== null ? config.workerNodes[editingGroupIndex] : undefined}
         onSave={handleSaveWorkerGroup}
+      />
+
+      <ProxyConfigDialog
+        open={proxyDialogOpen}
+        onOpenChange={setProxyDialogOpen}
+        proxyConfig={config.proxyConfig}
+        onSave={handleSaveProxy}
       />
     </div>
   );

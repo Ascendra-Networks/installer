@@ -5,6 +5,59 @@ import AnsibleService from './ansible.service.js';
 import { waitForSSHReady } from '../utils/ssh-checker.js';
 import onPremiseService from './onpremise.service.js';
 import inventoryGenerator from './inventory-generator.service.js';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+/**
+ * Parse the master's public IP from an Ansible inventory (.ini) file.
+ * Reads the first host under the [masters] section and returns its ansible_host value.
+ */
+function getMasterIpFromInventory(clusterName) {
+  try {
+    const projectRoot = path.resolve(__dirname, process.env.PROJECT_ROOT || '../../../');
+    const inventoryPath = path.join(
+      projectRoot,
+      process.env.ANSIBLE_INVENTORY_DIR || 'ansible/inventory',
+      `${clusterName}.ini`
+    );
+
+    if (!fs.existsSync(inventoryPath)) {
+      console.warn(`[Deployment] Inventory file not found: ${inventoryPath}`);
+      return null;
+    }
+
+    const content = fs.readFileSync(inventoryPath, 'utf8');
+    let inMasters = false;
+
+    for (const raw of content.split('\n')) {
+      const line = raw.trim();
+      if (!line || line.startsWith('#')) continue;
+
+      if (line.startsWith('[')) {
+        inMasters = line === '[masters]';
+        continue;
+      }
+
+      if (inMasters) {
+        const match = line.match(/ansible_host=(\S+)/);
+        if (match) {
+          console.log(`[Deployment] Master IP from inventory: ${match[1]}`);
+          return match[1];
+        }
+      }
+    }
+
+    console.warn(`[Deployment] No master ansible_host found in ${inventoryPath}`);
+    return null;
+  } catch (err) {
+    console.error(`[Deployment] Failed to read master IP from inventory:`, err.message);
+    return null;
+  }
+}
 
 const activeDeployments = new Map();
 const pendingRetries = new Map();
@@ -334,11 +387,15 @@ async function executeDeployment(deploymentId, io) {
     // === COMPLETION ===
     updateDeploymentStatus(deploymentId, 'completed', { completedAt: new Date().toISOString() });
 
+    const clusterName = deployment.clusterConfig?.name || deployment.onPremiseConfig?.clusterName;
+    const masterIp = getMasterIpFromInventory(clusterName);
+
     io.to(`deployment:${deploymentId}`).emit('deployment:completed', {
       deploymentId,
       message: 'Deployment completed successfully',
       terraformOutputs: isOnPremise ? null : context.terraformOutputs,
-      deploymentType: isOnPremise ? 'on-premise' : 'cloud'
+      deploymentType: isOnPremise ? 'on-premise' : 'cloud',
+      masterIp
     });
 
     console.log(`[Deployment] Deployment ${deploymentId} completed successfully`);

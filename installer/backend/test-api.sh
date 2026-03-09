@@ -87,7 +87,7 @@ deployment_data='{
       "name": "Workers",
       "machines": [{
         "id": "m1",
-        "machineType": "t3.large",
+        "machineType": "t3.xlarge",
         "nodeCount": 2
       }],
       "storageClass": "standard",

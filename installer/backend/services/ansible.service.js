@@ -250,7 +250,7 @@ class AnsibleService {
     });
 
     try {
-      await this.executePlaybook('k8s-cluster-deploy.yml');
+      await this.executePlaybook('ascendra-environment/k8s-cluster-deploy.yml');
 
       this.progressCallback({
         phase: 'ansible',
@@ -282,12 +282,12 @@ class AnsibleService {
 
     try {
       const extraVars = {
-        tyr_ghcr_username: process.env.TYR_GHCR_USERNAME || 'avivl777',
-        tyr_ghcr_password: process.env.TYR_GHCR_PASSWORD || '',
-        tyr_version: process.env.TYR_VERSION || '1.0.4'
+        ghcr_username: process.env.GHCR_USERNAME || 'avivl777',
+        ghcr_password: process.env.GHCR_PASSWORD || '',
+        tyr_version: process.env.TYR_VERSION || '1.0.7'
       };
 
-      await this.executePlaybook('tyr-deploy.yml', extraVars);
+      await this.executePlaybook('ascendra-environment/tyr-deploy.yml', extraVars);
 
       this.progressCallback({
         phase: 'ansible',
@@ -318,7 +318,11 @@ class AnsibleService {
     });
 
     try {
-      const output = await this.executePlaybook('dashboard-deploy.yml');
+      const extraVars = {
+        ghcr_username: process.env.GHCR_USERNAME || 'avivl777',
+        ghcr_password: process.env.GHCR_PASSWORD || ''
+      };
+      const output = await this.executePlaybook('ascendra-environment/dashboard-deploy.yml', extraVars);
 
       let dashboardUrl = null;
       // Strip ANSI escape codes before parsing

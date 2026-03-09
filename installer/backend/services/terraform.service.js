@@ -18,7 +18,7 @@ class TerraformService {
     this.projectRoot = path.resolve(__dirname, process.env.PROJECT_ROOT || '../../../');
     this.terraformEnvDir = path.join(
       this.projectRoot,
-      process.env.TERRAFORM_ENV_DIR || 'terraform/environments/aws-dev'
+      process.env.TERRAFORM_ENV_DIR || 'terraform/environments/aws'
     );
     this.tfvarsFile = `${deployment.clusterConfig.name}.tfvars`;
   }
@@ -93,6 +93,13 @@ class TerraformService {
   async init() {
     console.log(`[Terraform] Initializing in ${this.terraformEnvDir}`);
 
+    // Remove stale .terraform directory so init always starts clean.
+    const dotTerraformDir = path.join(this.terraformEnvDir, '.terraform');
+    if (fs.existsSync(dotTerraformDir)) {
+      fs.rmSync(dotTerraformDir, { recursive: true, force: true });
+      console.log('[Terraform] Removed stale .terraform directory');
+    }
+
     this._sendProgress({
       phase: 'terraform',
       step: 'init',
@@ -110,9 +117,11 @@ class TerraformService {
     ]);
 
     return new Promise((resolve, reject) => {
-      const terraform = spawn('terraform', ['init'], {
+      // `-force-copy` auto-migrates state without prompting, works cross-platform.
+      const terraform = spawn('terraform', ['init', '-force-copy'], {
         cwd: this.terraformEnvDir,
-        shell: true
+        shell: true,
+        stdio: ['ignore', 'pipe', 'pipe']
       });
 
       let output = '';
@@ -208,10 +217,12 @@ class TerraformService {
       const terraform = spawn('terraform', [
         'plan',
         `-var-file=${this.tfvarsFile}`,
-        '-out=tfplan'
+        '-out=tfplan',
+        '-input=false'
       ], {
         cwd: this.terraformEnvDir,
-        shell: true
+        shell: true,
+        stdio: ['ignore', 'pipe', 'pipe']
       });
 
       let output = '';
@@ -293,10 +304,12 @@ class TerraformService {
       const terraform = spawn('terraform', [
         'apply',
         '-auto-approve',
+        '-input=false',
         `-var-file=${this.tfvarsFile}`
       ], {
         cwd: this.terraformEnvDir,
         shell: true,
+        stdio: ['ignore', 'pipe', 'pipe'],
         env: { ...process.env, TF_IN_AUTOMATION: '1' }
       });
 

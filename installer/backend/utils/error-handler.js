@@ -139,12 +139,12 @@ function asyncErrorHandler(fn) {
 function checkEnvironment() {
   const warnings = [];
   
-  if (!process.env.TYR_GHCR_USERNAME) {
-    warnings.push('TYR_GHCR_USERNAME not set - Tyr deployment will fail');
+  if (!process.env.GHCR_USERNAME) {
+    warnings.push('GHCR_USERNAME not set - Tyr deployment will fail');
   }
   
-  if (!process.env.TYR_GHCR_PASSWORD) {
-    warnings.push('TYR_GHCR_PASSWORD not set - Tyr deployment will fail');
+  if (!process.env.GHCR_PASSWORD) {
+    warnings.push('GHCR_PASSWORD not set - Tyr deployment will fail');
   }
   
   if (warnings.length > 0) {

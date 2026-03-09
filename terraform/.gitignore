@@ -1,0 +1,14 @@
+# State and plan files
+*.tfstate
+*.tfstate.*
+*.tfplan
+.terraform/
+
+# Workspace state (terraform.tfstate.d/dev, terraform.tfstate.d/prod, etc.)
+terraform.tfstate.d/
+
+# Generated SSH keys (created by cluster module; stored under environments/*/.ssh/)
+.ssh/
+
+# Optional: lock file can be committed for reproducible builds
+# .terraform.lock.hcl

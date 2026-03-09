@@ -1,0 +1,4 @@
+# State path for workspace "dev". Path relative to cwd (terraform/environments/aws).
+# Run: terraform init -reconfigure -backend-config=backend-config/dev.tfbackend
+
+path = "../../../state/dev/state.tfstate"

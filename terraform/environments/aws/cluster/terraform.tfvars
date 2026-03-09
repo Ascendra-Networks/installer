@@ -1,0 +1,29 @@
+# Example variable file. Copy to <cluster_name>.tfvars and customize.
+# Use workspaces (dev, prod) to separate environments; tfvars define the cluster.
+
+cluster_name          = "my-cluster"
+aws_region            = "us-east-1"
+availability_zone     = "us-east-1a"
+master_instance_type  = "t3.xlarge"
+worker_instance_type  = "t3.xlarge"   # used if worker_instances is empty
+worker_count          = 2            # used if worker_instances is empty
+
+# Optional: use existing VPC/subnet (leave empty to create new)
+# vpc_id   = "vpc-xxxxx"
+# subnet_id = "subnet-xxxxx"
+
+# Optional: override CIDRs when creating new VPC/subnet (defaults from config/cluster-defaults.json)
+# vpc_cidr   = "10.0.0.0/16"
+# subnet_cidr = "10.0.1.0/24"
+
+# Optional: worker groups with type and count (overrides worker_count + worker_instance_type)
+# worker_instances = {
+#   "general" = { type = "t3.large", count = 2 }
+#   "gpu"     = { type = "g4dn.xlarge", count = 1, ami = "ami-xxxx" }
+# }
+
+# Optional: placement group for workers ("cluster" | "spread" | "partition" | "")
+# placement_group_strategy = "cluster"
+
+# Optional: SSH public key (if empty, module generates a key pair and saves private key to .ssh/)
+# ssh_public_key = "ssh-rsa AAAA..."

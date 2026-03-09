@@ -48,7 +48,7 @@ variable "worker_instances" {
     - type: Instance type (required)
     - count: Number of instances (required)
     - ami: Custom AMI ID (optional - if not specified, uses default Ubuntu x86_64 AMI)
-    
+
     Example:
     {
       "group-1" = { type = "t3.large", count = 2 }
@@ -78,13 +78,13 @@ variable "subnet_id" {
 variable "vpc_cidr" {
   description = "CIDR block for VPC (only used if creating new VPC). Default loaded from config/cluster-defaults.json"
   type        = string
-  default     = ""  # Will use default from cluster-defaults.json if empty
+  default     = ""
 }
 
 variable "subnet_cidr" {
   description = "CIDR block for subnet (only used if creating new subnet). Default loaded from config/cluster-defaults.json"
   type        = string
-  default     = ""  # Will use default from cluster-defaults.json if empty
+  default     = ""
 }
 
 variable "placement_group_strategy" {
@@ -109,4 +109,3 @@ variable "ssh_public_key" {
   type        = string
   default     = ""
 }
-

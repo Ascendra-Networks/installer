@@ -37,29 +37,28 @@ output "subnet_id" {
 
 output "next_steps" {
   value = <<-EOF
-    
+
 === Infrastructure Provisioned Successfully! ===
-    
+
 Next Steps:
-    
+
 1. Wait for instances to be ready (60 seconds):
    sleep 60
-    
-2. Deploy Kubernetes using Ansible:
+
+2. Deploy Kubernetes using Ansible (from repo root):
    cd ../../../ansible
    ./run.sh inventory/${var.cluster_name}.ini
-    
+
 3. SSH to master node:
    ssh ubuntu@${aws_instance.k8s_master[0].public_ip}
-    
+
 4. Deploy Tyr and KubeVirt (on master node):
    Follow instructions in scripts/on_prem_setup.md
-    
+
 5. Deploy VMs using Helm:
    helm install my-vms ../helm/kubevirt-vms --set vmCount=4
-    
+
 Master IPs: ${join(", ", aws_instance.k8s_master[*].public_ip)}
 Worker IPs: ${join(", ", [for instance in aws_instance.k8s_worker : instance.public_ip])}
 EOF
 }
-

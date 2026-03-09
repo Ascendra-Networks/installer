@@ -8,6 +8,12 @@ variable "aws_region" {
   type        = string
 }
 
+variable "aws_profile" {
+  description = "AWS CLI profile name from ~/.aws/credentials (optional; leave empty for default profile or env vars)"
+  type        = string
+  default     = ""
+}
+
 variable "availability_zone" {
   description = "AWS availability zone"
   type        = string
@@ -48,7 +54,7 @@ variable "worker_instances" {
     - type: Instance type (required)
     - count: Number of instances (required)
     - ami: Custom AMI ID (optional - if not specified, uses default Ubuntu x86_64 AMI)
-    
+
     Example:
     {
       "group-1" = { type = "t3.large", count = 2 }
@@ -98,4 +104,3 @@ variable "ssh_public_key" {
   type        = string
   default     = ""
 }
-

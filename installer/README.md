@@ -21,7 +21,7 @@ The backend orchestrates Terraform and Ansible processes and streams real-time p
 Copy and fill in the environment file:
 
 ```bash
-cp installer/backend/.env.example installer/backend/.env
+cp installer/backend/example.env installer/backend/.env
 ```
 
 | Variable | Required | Description |
